@@ -1,0 +1,116 @@
+{
+  "projectType": "general",
+  "projectName": "Module Federation Examples",
+  "projectDescription": "A comprehensive collection of reference implementations showcasing Webpack 5 Module Federation patterns for building micro frontend architectures across React, Vue, Angular, and more.",
+  "theme": "palm",
+  "primaryColor": "#1c2434",
+  "lightColor": "#77a1da",
+  "darkColor": "#595290",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Getting Started",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "core-concepts"
+            ]
+          },
+          {
+            "group": "Foundational Examples",
+            "pages": [
+              "examples/basic-host-remote",
+              "examples/bi-directional",
+              "examples/dynamic-remotes"
+            ]
+          },
+          {
+            "group": "Build Tools",
+            "pages": [
+              "examples/webpack",
+              "examples/rspack",
+              "examples/vite"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Framework Integrations",
+            "pages": [
+              "examples/react",
+              "examples/vue",
+              "examples/angular",
+              "examples/cross-framework"
+            ]
+          },
+          {
+            "group": "Server-Side Rendering",
+            "pages": [
+              "examples/ssr-overview",
+              "examples/nextjs",
+              "examples/react-18-ssr"
+            ]
+          },
+          {
+            "group": "Advanced Patterns",
+            "pages": [
+              "examples/shared-dependencies",
+              "examples/shared-routing",
+              "examples/runtime-plugins",
+              "examples/error-handling"
+            ]
+          },
+          {
+            "group": "TypeScript",
+            "pages": [
+              "examples/typescript",
+              "examples/typescript-monorepo"
+            ]
+          },
+          {
+            "group": "Deployment & Operations",
+            "pages": [
+              "examples/deployment",
+              "examples/frontend-discovery",
+              "examples/testing"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Host and remote application patterns with Webpack 5 Module Federation",
+    "Bi-directional federation where apps both expose and consume modules",
+    "Dynamic remote loading at runtime without pre-configuration",
+    "Server-Side Rendering (SSR) with Next.js and React 18",
+    "Cross-framework federation: React, Vue, Angular, Svelte, LitElement together",
+    "Rspack and Webpack interoperability with @module-federation/enhanced",
+    "Vite-based federation via native-federation and vite-plugin-federation",
+    "TypeScript support with automatic type streaming between remotes",
+    "Runtime plugins for advanced control inversion (share negotiation, error handling)",
+    "Self-healing fallbacks when shared dependencies are missing",
+    "Shared routing, state, and app shell patterns for micro frontends",
+    "E2E testing infrastructure using Playwright across all examples"
+  ],
+  "publicApiSurface": [
+    "ModuleFederationPlugin (webpack/rspack) — exposes/consumes federated modules",
+    "ModuleFederationPlugin({ name, exposes, remotes, shared }) config object",
+    "exposes: { './Component': './src/Component' } — module exposure map",
+    "remotes: { app2: 'app2@http://localhost:3002/remoteEntry.js' } — remote registry",
+    "shared: { react: { singleton: true } } — shared dependency config",
+    "@module-federation/enhanced/webpack — enhanced plugin for Webpack",
+    "@module-federation/enhanced/rspack — enhanced plugin for Rspack",
+    "@module-federation/modern-js — Modern.js integration plugin",
+    "@module-federation/nextjs-mf — Next.js integration plugin",
+    "@module-federation/typescript — TypeScript type streaming plugin",
+    "asyncStartup experiment — deferred module loading for performance",
+    "Runtime Plugin API — control inversion hooks for share negotiation"
+  ]
+}

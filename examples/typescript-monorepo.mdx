@@ -1,0 +1,499 @@
+---
+title: "TypeScript Monorepo"
+description: "TypeScript project references and monorepo patterns for Module Federation"
+---
+
+Monorepos give you a single place to manage shared types, build scripts, and package versions across federated applications. Module Federation works well in monorepo setups, and TypeScript offers two complementary mechanisms for sharing types without duplicating type stubs: **project references** and **`typesVersions`**.
+
+<CardGroup cols={2}>
+  <Card title="typescript-react-monorepo" icon="diagram-project">
+    Full monorepo with host + two remotes using `@module-federation/typescript` for type streaming.
+  </Card>
+  <Card title="typescript-project-references" icon="link">
+    TypeScript project references as a zero-plugin alternative to type streaming.
+  </Card>
+  <Card title="typescript-monorepo" icon="boxes-stacked">
+    Yarn/pnpm workspaces with `typesVersions` so the remote package resolves sub-path imports.
+  </Card>
+  <Card title="Incremental builds" icon="bolt">
+    Project references enable `tsc --build` to skip packages that have not changed.
+  </Card>
+</CardGroup>
+
+## TypeScript React Monorepo (`typescript-react-monorepo`)
+
+This example is a three-package workspace — `host`, `app1`, and `app2` — where every package uses `@module-federation/typescript` to stream types. The host reads remote types from both remotes at startup.
+
+### Workspace structure
+
+```
+typescript-react-monorepo/
+├── package.json          # workspace root
+└── packages/
+    ├── host/             # consumes app1 and app2
+    ├── app1/             # exposes Layout and Routers
+    └── app2/             # exposes Button and Routers
+```
+
+### Host federation config (`packages/host/configs/federationConfig.js`)
+
+```javascript packages/host/configs/federationConfig.js
+const { dependencies } = require('../package.json');
+
+const federationConfig = ({ APP1, APP2 }) => {
+  return {
+    name: 'Host',
+    filename: 'remoteEntry.js',
+    remotes: {
+      app1: `app1@${APP1}/remoteEntry.js`,
+      app2: `app2@${APP2}/remoteEntry.js`,
+    },
+    shared: {
+      ...dependencies,
+      react: { singleton: true, requiredVersion: dependencies['react'] },
+      'react-dom': { singleton: true, requiredVersion: dependencies['react-dom'] },
+    },
+  };
+};
+
+module.exports = federationConfig;
+```
+
+### Host webpack base config (`packages/host/configs/webpack.base.js`)
+
+```javascript packages/host/configs/webpack.base.js
+const path = require('path');
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const webpack = require('webpack');
+const { ModuleFederationPlugin } = webpack.container;
+const { FederatedTypesPlugin } = require('@module-federation/typescript');
+const federationConfig = require('./federationConfig');
+
+const initModuleFederationConfig = federationConfig({
+  APP1: 'http://localhost:3001',
+  APP2: 'http://localhost:3002',
+});
+
+module.exports = {
+  entry: { main: path.join(__dirname, '../src/index.ts') },
+  module: {
+    rules: [
+      {
+        test: /\.(js|jsx|tsx|ts)$/,
+        loader: 'ts-loader',
+        exclude: /node_modules/,
+      },
+    ],
+  },
+  output: { publicPath: 'auto' },
+  plugins: [
+    new ModuleFederationPlugin(initModuleFederationConfig),
+    new FederatedTypesPlugin({ federationConfig: initModuleFederationConfig }),
+    new HtmlWebpackPlugin({
+      template: 'public/index.html',
+      title: 'Host App',
+      filename: 'index.html',
+      chunks: ['main'],
+      publicPath: '/',
+    }),
+  ],
+  resolve: { extensions: ['.tsx', '.ts', '.jsx', '.js', '.json'] },
+};
+```
+
+### Remote federation config (`packages/app1/configs/federationConfig.js`)
+
+```javascript packages/app1/configs/federationConfig.js
+const dependencies = require('../package.json').dependencies;
+
+module.exports = {
+  name: 'app1',
+  filename: 'remoteEntry.js',
+  exposes: {
+    './Layout': './src/components/Layout',
+    './Routers': './src/Routers',
+  },
+  shared: {
+    ...dependencies,
+    react: { singleton: true, requiredVersion: dependencies['react'] },
+    'react-dom': { singleton: true, requiredVersion: dependencies['react-dom'] },
+  },
+};
+```
+
+### Host `tsconfig.json`
+
+```json packages/host/tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "baseUrl": "./",
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": false,
+    "jsx": "react-jsx"
+  },
+  "include": ["**/*.ts", "**/*.tsx", "*.d.ts", "**/*.js", "src", "@mf-types"],
+  "exclude": ["node_modules"]
+}
+```
+
+<Note>
+  The `"@mf-types"` entry in `include` ensures TypeScript picks up the generated declaration files that `FederatedTypesPlugin` writes into each package's `@mf-types/` directory.
+</Note>
+
+### Ambient module declarations
+
+Because the host cannot statically resolve federated module paths, declare them in a `global.d.ts` file:
+
+```typescript packages/host/src/global.d.ts
+///<reference types="react" />
+
+declare module 'app1/Layout';
+declare module 'app1/Routers';
+declare module 'app2/Routers';
+declare module 'app2/Button';
+```
+
+### Running
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    cd typescript-react-monorepo
+    yarn
+    ```
+  </Step>
+  <Step title="Start all packages">
+    ```bash
+    pnpm run start
+    ```
+    - Host: [localhost:4000](http://localhost:4000)
+    - app1: [localhost:3001](http://localhost:3001)
+    - app2: [localhost:3002](http://localhost:3002)
+  </Step>
+</Steps>
+
+<Tip>
+  Use the `.env` file in the host package to override remote addresses without touching webpack config. The federation config reads from `process.env` via `webpack.DefinePlugin`.
+</Tip>
+
+---
+
+## TypeScript project references (`typescript-project-references`)
+
+TypeScript [project references](https://www.typescriptlang.org/docs/handbook/project-references.html) allow `app1`'s TypeScript compiler to traverse into `app2`'s source tree directly. This gives you full type safety on remote imports — including incremental compilation — with no additional plugins.
+
+### How references enable incremental compilation
+
+When you add `"references": [{ "path": "../app2" }]` to `app1`'s `tsconfig.json`, `tsc --build` checks whether `app2`'s output is up to date. If `app2` has not changed since the last build, its types are served from the cached `.tsbuildinfo` file and app1 compiles faster. The `"composite": true` flag in the base config is what enables this caching.
+
+### Root `tsconfig.base.json`
+
+```json tsconfig.base.json
+{
+  "compilerOptions": {
+    "sourceMap": true,
+    "strict": true,
+    "jsx": "react",
+    "composite": true,
+    "paths": {
+      "app2/*": ["./app2/src/*"]
+    }
+  },
+  "files": []
+}
+```
+
+The `paths` mapping makes `import('app2/Button')` resolve to `./app2/src/Button.tsx` during type-checking, matching the runtime path that Module Federation uses.
+
+### app1 tsconfig (host)
+
+```json app1/tsconfig.json
+{
+  "extends": "../tsconfig.base.json",
+  "references": [{ "path": "../app2" }],
+  "include": ["src"]
+}
+```
+
+### app2 tsconfig (remote)
+
+```json app2/tsconfig.json
+{
+  "extends": "../tsconfig.base.json",
+  "include": ["src"]
+}
+```
+
+### Webpack configs
+
+The project references approach replaces the type plugin with `tsconfig-paths-webpack-plugin`, which teaches webpack to resolve module paths from `tsconfig.json`'s `paths` at bundle time.
+
+<CodeGroup>
+
+```javascript app1/webpack.config.js
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const path = require('path');
+const TsconfigPathsPlugin = require('tsconfig-paths-webpack-plugin');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    static: { directory: path.join(__dirname, 'dist') },
+    port: 3001,
+  },
+  output: { publicPath: 'auto' },
+  resolve: {
+    extensions: ['.ts', '.tsx', '.js'],
+    plugins: [new TsconfigPathsPlugin()],
+  },
+  module: {
+    rules: [
+      {
+        test: /\.tsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react', '@babel/preset-typescript'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app1',
+      remotes: { app2: 'app2@http://localhost:3002/remoteEntry.js' },
+      shared: ['react', 'react-dom'],
+    }),
+    new HtmlWebpackPlugin({ template: './public/index.html' }),
+  ],
+};
+```
+
+```javascript app2/webpack.config.js
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const path = require('path');
+const TsconfigPathsPlugin = require('tsconfig-paths-webpack-plugin');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    static: { directory: path.join(__dirname, 'dist') },
+    port: 3002,
+  },
+  output: { publicPath: 'auto' },
+  resolve: {
+    extensions: ['.ts', '.tsx', '.js'],
+    plugins: [new TsconfigPathsPlugin()],
+  },
+  module: {
+    rules: [
+      {
+        test: /\.tsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react', '@babel/preset-typescript'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app2',
+      filename: 'remoteEntry.js',
+      exposes: { './Button': './src/Button' },
+      shared: ['react', 'react-dom'],
+    }),
+    new HtmlWebpackPlugin({ template: './public/index.html' }),
+  ],
+};
+```
+
+</CodeGroup>
+
+### Type-safe remote import
+
+With project references configured, `import('app2/Button')` resolves directly to the source file. No cast or `@ts-expect-error` is needed:
+
+```tsx app1/src/App.tsx
+import * as React from 'react';
+
+const RemoteButton = React.lazy(() => import('app2/Button'));
+
+const App = () => (
+  <div>
+    <h1>Typescript</h1>
+    <h2>App 1</h2>
+    <React.Suspense fallback="Loading Button">
+      <RemoteButton />
+    </React.Suspense>
+  </div>
+);
+
+export default App;
+```
+
+### Running
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    cd typescript-project-references
+    yarn
+    ```
+  </Step>
+  <Step title="Start both apps">
+    ```bash
+    pnpm run start
+    ```
+    - app1 (host): [localhost:3001](http://localhost:3001)
+    - app2 (remote): [localhost:3002](http://localhost:3002)
+  </Step>
+</Steps>
+
+---
+
+## Shared types with `typesVersions` (`typescript-monorepo`)
+
+The `typescript-monorepo` example uses pnpm/yarn workspaces with [`typesVersions`](https://www.typescriptlang.org/docs/handbook/declaration-files/publishing.html#version-selection-with-typesversions) so that `app1` can declare `typescript-monorepo_app2` as a workspace dependency and import sub-paths from it with correct types.
+
+### `app2/package.json` with `typesVersions`
+
+```json app2/package.json
+{
+  "name": "typescript-monorepo_app2",
+  "version": "0.0.0",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "typesVersions": {
+    "*": {
+      "Button": ["./src/Button.tsx"]
+    }
+  }
+}
+```
+
+`typesVersions` maps the sub-path `"Button"` to the source file. TypeScript resolves `import type { ... } from 'typescript-monorepo_app2/Button'` to `./src/Button.tsx` without any additional path configuration.
+
+### `app1/package.json` workspace dependency
+
+```json app1/package.json
+{
+  "name": "typescript-monorepo_app1",
+  "devDependencies": {
+    "typescript-monorepo_app2": "workspace:*"
+  }
+}
+```
+
+Declaring the remote package as a workspace dependency means the type information is available without running a build or streaming plugin.
+
+### Dynamic remote loading with typed imports
+
+```tsx app1/src/App.tsx
+import * as React from 'react';
+
+const RemoteButton = React.lazy(() => import('@typescript-monorepo/app2/Button'));
+
+const App = () => (
+  <div>
+    <h1>Typescript</h1>
+    <h2>App 1</h2>
+    <React.Suspense fallback="Loading Button">
+      <RemoteButton />
+    </React.Suspense>
+  </div>
+);
+
+export default App;
+```
+
+The host uses a promise-based remote entry to load `app2` dynamically at runtime, which supports versioned remote entries or runtime-determined URLs:
+
+```javascript app1/webpack.config.js (remotes section)
+remotes: {
+  '@typescript-monorepo/app2': `promise new Promise(resolve => {
+    const remoteUrlWithVersion = 'http://localhost:3002/remoteEntry.js'
+    const script = document.createElement('script')
+    script.src = remoteUrlWithVersion
+    script.onload = () => {
+      const proxy = {
+        get: (request) => window._typescript_monorepo_app2.get(request),
+        init: (arg) => {
+          try {
+            return window._typescript_monorepo_app2.init(arg)
+          } catch(e) {
+            console.log('remote container already initialized')
+          }
+        }
+      }
+      resolve(proxy)
+    }
+    document.head.appendChild(script);
+  })`,
+},
+```
+
+### Running
+
+```bash
+cd typescript-monorepo
+yarn          # install workspace dependencies
+pnpm run start
+```
+
+---
+
+## When to use project references vs type streaming
+
+<Tabs>
+  <Tab title="Project references">
+    **Use when:**
+    - All federated applications live in the same monorepo
+    - You want `tsc --build` incremental compilation
+    - You want the TypeScript compiler to type-check across package boundaries during CI
+    - You do not want to maintain a separate plugin
+
+    **Trade-offs:**
+    - Only works if the host can reach the remote's source files at compile time
+    - Remote source changes require a rebuild of dependent packages
+    - Does not work for remotes deployed by another team or organisation
+  </Tab>
+  <Tab title="Type streaming plugin">
+    **Use when:**
+    - Remotes are deployed independently (different repos, different teams)
+    - You cannot reference remote source directly
+    - You want types to update automatically when the remote is redeployed
+
+    **Trade-offs:**
+    - Requires `@module-federation/typescript` in every participating application
+    - Types are only available after the remote's dev server has started
+    - The `@mf-types/` directory must be committed or regenerated in CI before the host compiles
+  </Tab>
+  <Tab title="typesVersions">
+    **Use when:**
+    - Packages are in the same workspace and published as npm packages
+    - You want sub-path imports (`package/Button`) to resolve without extra tooling
+    - Remote packages already have a structured `package.json`
+
+    **Trade-offs:**
+    - Requires the remote to be a proper workspace package
+    - Does not work for remotes outside the workspace
+  </Tab>
+</Tabs>
+
+<Warning>
+  Do not mix project references and `FederatedTypesPlugin` for the same remote in the same host. The `paths` configuration they each require can conflict. Pick one approach per remote.
+</Warning>

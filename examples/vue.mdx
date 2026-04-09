@@ -1,0 +1,275 @@
+---
+title: "Vue"
+description: "Module Federation with Vue 2 and Vue 3 — consuming and exposing Vue components"
+---
+
+Vue works well with Module Federation because its component model maps naturally onto federation's expose/consume pattern. These examples cover Vue 3 with Webpack, shared Vuex state via Rsbuild, and migration strategies from Vue 2.
+
+<CardGroup cols={2}>
+  <Card title="Vue 3 + Webpack" icon="cube" href="https://github.com/module-federation/module-federation-examples/tree/master/vue3-demo">
+    Host (layout) app consumes Vue components from a remote (home) app.
+  </Card>
+  <Card title="Rsbuild + Vue 3 + Vuex" icon="database" href="https://github.com/module-federation/module-federation-examples/tree/master/rsbuild-vue3-vuex">
+    Share a Vuex store instance across a provider and consumer built with Rsbuild.
+  </Card>
+  <Card title="Vue 2 in Vue 3" icon="arrows-turn-right" href="https://github.com/module-federation/module-federation-examples/tree/master/vue2-in-vue3">
+    Incrementally migrate a Vue 2 remote into a Vue 3 host.
+  </Card>
+  <Card title="React in Vue" icon="shuffle" href="/examples/cross-framework">
+    Mount a React component inside a Vue host. See the cross-framework page.
+  </Card>
+</CardGroup>
+
+---
+
+## Vue 3 with Webpack
+
+The `vue3-demo` example has two apps:
+
+| App | Role | Port |
+|-----|------|------|
+| `home` | Remote — exposes `Content` and `Button` Vue components | 3002 |
+| `layout` | Host — consumes both remote components | 3001 |
+
+### home — exposing Vue components
+
+```javascript home/webpack.config.js
+const { VueLoaderPlugin } = require('vue-loader');
+const MiniCssExtractPlugin = require('mini-css-extract-plugin');
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+module.exports = (env = {}) => ({
+  mode: 'development',
+  output: {
+    publicPath: 'auto',
+  },
+  resolve: {
+    extensions: ['.vue', '.jsx', '.js', '.json'],
+  },
+  module: {
+    rules: [
+      { test: /\.vue$/, use: 'vue-loader' },
+      {
+        test: /\.css$/,
+        use: [{ loader: MiniCssExtractPlugin.loader }, 'css-loader'],
+      },
+    ],
+  },
+  plugins: [
+    new MiniCssExtractPlugin({ filename: '[name].css' }),
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'home',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './Content': './src/components/Content',
+        './Button': './src/components/Button',
+      },
+      shareStrategy: 'loaded-first',
+      shared: {
+        vue: { singleton: true },
+      },
+    }),
+    new HtmlWebpackPlugin({ template: './index.html' }),
+    new VueLoaderPlugin(),
+  ],
+  devServer: {
+    port: 3002,
+    hot: true,
+    headers: { 'Access-Control-Allow-Origin': '*' },
+  },
+});
+```
+
+### layout — consuming remote Vue components
+
+The layout (host) app declares `home` as a remote and registers the remote components as async Vue components using `defineAsyncComponent`.
+
+```javascript layout/webpack.config.js
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'layout',
+  filename: 'remoteEntry.js',
+  remotes: {
+    home: 'home@http://localhost:3002/remoteEntry.js',
+  },
+  exposes: {},
+  shareStrategy: 'loaded-first',
+  shared: {
+    vue: { singleton: true },
+  },
+}),
+```
+
+```javascript layout/src/main.js
+import { createApp, defineAsyncComponent } from 'vue';
+import Layout from './Layout.vue';
+
+const Content = defineAsyncComponent(() => import('home/Content'));
+const Button = defineAsyncComponent(() => import('home/Button'));
+
+const app = createApp(Layout);
+
+app.component('content-element', Content);
+app.component('button-element', Button);
+
+app.mount('#app');
+```
+
+`defineAsyncComponent` handles loading and error states automatically, similar to React's `lazy`/`Suspense` pattern.
+
+### Layout template
+
+The host template uses the globally registered remote components by name:
+
+```vue layout/src/Layout.vue
+<template>
+  <div class="layout-app">
+    <div class="app-label"># Hosting App [HOST]</div>
+    <h1>Layout App 1</h1>
+    <div class="remote-component">
+      <div class="app-label">#remote-component [REMOTE]</div>
+      <content-element />
+      <button-element />
+    </div>
+  </div>
+</template>
+```
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Start both apps">
+    ```bash
+    pnpm run start
+    ```
+  </Step>
+  <Step title="Open the host">
+    Visit `http://localhost:3001`. The `content-element` and `button-element` are served from `home` at port 3002.
+  </Step>
+</Steps>
+
+---
+
+## Shared Vuex state with Rsbuild
+
+The `rsbuild-vue3-vuex` example uses Rsbuild (Rspack-based) to federate both Vue components and a Vuex store. The provider exposes an `AppIndex` component and the entire store; the consumer imports both as remote modules and shares the same Vuex state.
+
+<Tabs>
+  <Tab title="provider (port 3001)">
+    ```typescript provider/rsbuild.config.ts
+    import { defineConfig } from '@rsbuild/core';
+    import { pluginVue } from '@rsbuild/plugin-vue';
+    import { ModuleFederationPlugin } from '@module-federation/enhanced/rspack';
+    import { dependencies } from './package.json';
+
+    export default defineConfig({
+      server: { port: 3001 },
+      dev: { assetPrefix: 'http://localhost:3001' },
+      tools: {
+        rspack: (config, { appendPlugins }) => {
+          appendPlugins([
+            new ModuleFederationPlugin({
+              name: 'ASSET_REMOTE',
+              filename: 'remoteEntry.js',
+              exposes: {
+                './AppIndex': './src/views/AppIndex',
+                './store': './src/store/index',
+              },
+              shared: {
+                vue: { singleton: true, requiredVersion: dependencies.vue },
+                vuex: { singleton: true, requiredVersion: dependencies.vuex },
+              },
+            }),
+          ]);
+        },
+      },
+      plugins: [pluginVue()],
+    });
+    ```
+  </Tab>
+  <Tab title="consumer (port 3000)">
+    ```typescript consumer/rsbuild.config.ts
+    import { defineConfig } from '@rsbuild/core';
+    import { pluginVue } from '@rsbuild/plugin-vue';
+    import { ModuleFederationPlugin } from '@module-federation/enhanced/rspack';
+    import { dependencies } from './package.json';
+
+    export default defineConfig({
+      server: { port: 3000 },
+      tools: {
+        rspack: (config, { appendPlugins }) => {
+          appendPlugins([
+            new ModuleFederationPlugin({
+              name: 'ASSET_HOST',
+              filename: 'ASSET_HOST__remoteEntry.js',
+              remotes: {
+                '@remote': 'ASSET_REMOTE@http://localhost:3001/remoteEntry.js',
+              },
+              shared: {
+                vue: { singleton: true, requiredVersion: dependencies.vue },
+                vuex: { singleton: true, requiredVersion: dependencies.vuex },
+              },
+            }),
+          ]);
+        },
+      },
+      plugins: [pluginVue()],
+    });
+    ```
+  </Tab>
+</Tabs>
+
+The consumer imports the provider's `AppIndex` component using the `@remote` alias defined in `remotes`:
+
+```vue consumer/src/views/Index.vue
+<script>
+import AppIndex from "@remote/AppIndex";
+
+export default {
+  name: "HostIndex",
+  components: { AppIndex },
+  computed: {
+    userData() { return this.$store.state.userData; },
+    initialLoaded() { return this.$store.state.initialLoaded; },
+  },
+  mounted() {
+    this.$store.dispatch("getUserData").catch(console.log);
+  },
+};
+</script>
+
+<template>
+  <p>Hi There, this is consumer app. userData from remote: {{ userData }}</p>
+  <AppIndex>
+    <router-view />
+  </AppIndex>
+</template>
+```
+
+<Info>
+  Both `vue` and `vuex` are marked `singleton: true` so the same store instance is shared across the provider and consumer. Without this, each app would initialise its own independent store.
+</Info>
+
+---
+
+## Key considerations
+
+<AccordionGroup>
+  <Accordion title="Vue must be a singleton">
+    Vue stores reactivity state globally. If two copies of Vue are loaded on the same page, `provide`/`inject`, Vuex, and Pinia will all fail silently. Always set `vue: { singleton: true }` in the shared configuration of every participating app.
+  </Accordion>
+  <Accordion title="shareStrategy: 'loaded-first'">
+    The `vue3-demo` example uses `shareStrategy: 'loaded-first'`. This tells Module Federation to use whichever version of Vue was loaded first, rather than the highest compatible version. This is the safer option when you cannot guarantee all apps ship the same patch version.
+  </Accordion>
+  <Accordion title="publicPath: 'auto'">
+    Setting `publicPath: 'auto'` lets webpack infer the public path from the script tag URL at runtime. This is the recommended setting for federated remotes because it avoids hardcoding a hostname that breaks in staging or preview environments.
+  </Accordion>
+  <Accordion title="Vue 2 to Vue 3 migration">
+    The `vue2-in-vue3` example demonstrates loading a Vue 2 remote inside a Vue 3 host. Each version requires its own Vue instance, so they cannot share `vue` as a singleton. Instead, the host mounts the Vue 2 component into a plain DOM element and manages its lifecycle manually.
+  </Accordion>
+</AccordionGroup>

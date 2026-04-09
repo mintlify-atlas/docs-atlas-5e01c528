@@ -1,0 +1,274 @@
+---
+title: "Runtime plugins"
+description: "Extend Module Federation behavior at runtime using the 1.5 Plugin API for advanced control"
+---
+
+Runtime plugins let you intercept and modify Module Federation's internal behavior after the page loads — without rebuilding. They are the primary extension point in the federation 1.5 API and enable patterns like dynamic version negotiation, A/B testing of shared dependencies, offline fallbacks, and custom debugging tooling.
+
+## What runtime plugins are
+
+Module Federation 1.5 introduced a plugin system based on **control inversion**: instead of the runtime making all decisions internally, it exposes lifecycle hooks that your code can intercept. A plugin is a plain function that returns an object with named hook handlers.
+
+Plugins are available when using `@module-federation/enhanced` (webpack) or the built-in Module Federation support in Rspack.
+
+You register plugins in your webpack or Rspack config via the `runtimePlugins` array:
+
+```js webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+new ModuleFederationPlugin({
+  name: 'app1',
+  runtimePlugins: [require.resolve('./my-plugin.js')],
+  // ...
+})
+```
+
+## Available lifecycle hooks
+
+<AccordionGroup>
+  <Accordion title="beforeInit">
+    Called before the federation runtime initializes. Receives the options object. Use it to read the container name into plugin-local state or mutate initial options.
+
+    ```js
+    beforeInit: args => {
+      console.log('Initializing container:', args.options.name);
+      return args;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="resolveShare">
+    Called each time the runtime resolves a shared module. Receives the share scope map, package name, requested version, and the default resolver function. Override `args.resolver` to return a different shared module instance.
+
+    ```js
+    resolveShare: args => {
+      const originalResolver = args.resolver;
+      args.resolver = function () {
+        // custom resolution logic
+        return originalResolver();
+      };
+      return args;
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="init / afterInit">
+    Called during and after the initialization phase. Useful for registering diagnostics or setting up cross-container communication after all remotes have been wired up.
+  </Accordion>
+
+  <Accordion title="beforeLoadShare / loadShare">
+    Called before and during loading of a shared module chunk. Use these to instrument load times or swap in alternative module sources.
+  </Accordion>
+</AccordionGroup>
+
+## The `control-sharing` plugin
+
+The `control-sharing` example in the `runtime-plugins` directory is the most complete demonstration of the plugin API. It provides a **GUI control panel** rendered inside `app1` that lets you inspect all loaded shared modules and override which version each container uses — without reloading the build.
+
+### How it works
+
+<Steps>
+  <Step title="Plugin registration">
+    `app1`'s webpack config registers the `control-share.js` plugin via `runtimePlugins`:
+
+    ```js runtime-plugins/control-sharing/app1/webpack.config.js
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app1',
+      filename: 'remoteEntry.js',
+      remotes: {
+        app2: 'app2@http://localhost:3002/remoteEntry.js',
+      },
+      runtimePlugins: [require.resolve('../control-share.js')],
+      exposes: {
+        './Button': './src/Button',
+      },
+      shared: {
+        ...deps,
+        react: { singleton: true },
+        'react-dom': { singleton: true },
+      },
+    })
+    ```
+  </Step>
+
+  <Step title="Plugin stores container name">
+    The plugin uses `beforeInit` to capture the current container's name into module-level state, which it later uses to look up per-container overrides from `localStorage`.
+
+    ```js runtime-plugins/control-sharing/control-share.js
+    const runtimeStore = { name: '' };
+    const LOCAL_STORAGE_KEY = 'formDataVMSC';
+
+    const ControlScopeResolvePlugin = () => {
+      return {
+        name: 'control-scope-resolve-plugin',
+        beforeInit: args => {
+          runtimeStore.name = args.options.name;
+          return args;
+        },
+        // ...
+      };
+    };
+    ```
+  </Step>
+
+  <Step title="resolveShare intercepts version negotiation">
+    On every shared module resolution the plugin reads override preferences from `localStorage` and replaces `args.resolver` with a function that can return a different instance from the global `__FEDERATION__.__INSTANCES__` registry.
+
+    ```js runtime-plugins/control-sharing/control-share.js
+    resolveShare: args => {
+      let overrides;
+
+      try {
+        const formData = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (!formData) return args;
+        overrides = JSON.parse(formData);
+      } catch (error) {
+        console.error('Failed to parse form data:', error);
+        return args;
+      }
+
+      const originalResolver = args.resolver;
+      const { shareScopeMap, scope, pkgName, version, GlobalFederation } = args;
+
+      args.resolver = function () {
+        if (!overrides[runtimeStore.name]) {
+          return originalResolver();
+        }
+
+        const overrideVersion = overrides[runtimeStore.name][pkgName];
+        const matchingInstance = GlobalFederation.__INSTANCES__.find(
+          instance => instance.options.shared[pkgName]?.[0]?.version === overrideVersion,
+        );
+
+        if (matchingInstance) {
+          const current = shareScopeMap[scope][pkgName][version];
+          const override = matchingInstance.options.shared[pkgName][0];
+
+          if (current.from === override.from) return current;
+
+          // Remove this container from the original instance's useIn list
+          const originInstance = GlobalFederation.__INSTANCES__.find(
+            instance => instance.options.name === current.from,
+          );
+          if (originInstance) {
+            const sharedPkg = originInstance.options.shared[pkgName][0];
+            sharedPkg.useIn = sharedPkg.useIn.filter(i => i !== runtimeStore.name);
+          }
+
+          // Redirect this container to the override instance
+          shareScopeMap[scope][pkgName][version] = override;
+          if (!shareScopeMap[scope][pkgName][version].useIn.includes(runtimeStore.name)) {
+            shareScopeMap[scope][pkgName][version].useIn.push(runtimeStore.name);
+          }
+
+          return override;
+        }
+
+        return originalResolver();
+      };
+
+      return args;
+    },
+    ```
+  </Step>
+
+  <Step title="Control panel UI reads from __FEDERATION__">
+    The in-app `ControlPanel` component reads `__FEDERATION__.__INSTANCES__` to enumerate every loaded container and its shared modules. For each package it renders a version selector. Changing a selector writes to `localStorage` using the `formDataVMSC` key. Clicking **Save and Reload** reloads the page; on startup the plugin reads the stored preferences and applies the overrides.
+
+    ```js runtime-plugins/control-sharing/app1/src/ControlPanel/index.js
+    const instanceData = __FEDERATION__.__INSTANCES__.map(
+      ({ options: { shared }, name, shareScopeMap }) => ({
+        name,
+        shared,
+        shareScopeMap,
+      }),
+    );
+    ```
+  </Step>
+</Steps>
+
+### Running the example
+
+```bash
+cd runtime-plugins/control-sharing
+pnpm start
+```
+
+| App  | URL                   | Description                       |
+| ---- | --------------------- | --------------------------------- |
+| app1 | http://localhost:3001 | Host with control panel           |
+| app2 | http://localhost:3002 | Remote application                |
+
+Open `localhost:3001`. The control panel shows all shared modules (react, react-dom, lodash), their current versions, and a dropdown to override which instance each container uses.
+
+## Use cases
+
+<CardGroup cols={2}>
+  <Card title="Version negotiation" icon="arrows-up-down">
+    Override which shared module version a specific container receives without deploying a new build. Useful for gradual upgrades across a large micro frontend fleet.
+  </Card>
+  <Card title="A/B testing shared dependencies" icon="flask">
+    Route different users to different versions of a shared library by writing plugin logic that reads a user segment from a cookie or feature flag.
+  </Card>
+  <Card title="Debugging and diagnostics" icon="bug">
+    Enumerate `__FEDERATION__.__INSTANCES__` in a plugin to log every container's share scope at startup. The control-sharing example shows how to surface this in a real UI.
+  </Card>
+  <Card title="Offline and error fallbacks" icon="wifi-slash">
+    Intercept load failures in `loadShare` or use a plugin to substitute a stub module when a remote is offline. See the error-boundary example for a full implementation of this pattern.
+  </Card>
+</CardGroup>
+
+## Writing a simple runtime plugin
+
+A minimal plugin that logs every shared module resolution:
+
+```js my-log-plugin.js
+const LogPlugin = () => ({
+  name: 'log-plugin',
+  beforeInit: args => {
+    console.log('[federation] init:', args.options.name);
+    return args;
+  },
+  resolveShare: args => {
+    const original = args.resolver;
+    args.resolver = function () {
+      const result = original();
+      console.log(`[federation] resolved ${args.pkgName}@${args.version}`, result);
+      return result;
+    };
+    return args;
+  },
+});
+
+module.exports = LogPlugin;
+```
+
+Register it in your webpack config:
+
+```js webpack.config.js
+new ModuleFederationPlugin({
+  name: 'app1',
+  runtimePlugins: [require.resolve('./my-log-plugin.js')],
+  // ...
+})
+```
+
+<Warning>
+  Plugins run in the browser at runtime. Keep them small and free of Node.js-only dependencies. The file path passed to `runtimePlugins` is resolved at build time by webpack, but the module itself is executed in the client bundle.
+</Warning>
+
+## Related examples
+
+The `runtime-plugins` directory contains several other plugin examples beyond `control-sharing`:
+
+| Example                    | What it demonstrates                                      |
+| -------------------------- | --------------------------------------------------------- |
+| `isolate-shared-dependencies` | Prevent specific shared modules from leaking between containers |
+| `multiple-react-versions`  | Run two React versions in one page using plugin-level isolation |
+| `offline-remote`           | Return a stub container when a remote's `remoteEntry.js` fails to load |
+| `remote-control`           | Dynamically swap which remote URL a container resolves to |
+| `remote-router`            | Route remote resolution to different endpoints per environment |
+| `single-runtime`           | Share a single federation runtime instance across all containers |
+
+For error boundary integration with runtime plugins, see [Error handling](/examples/error-handling).

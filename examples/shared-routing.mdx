@@ -1,0 +1,285 @@
+---
+title: "Shared routing & app shell"
+description: "Build a unified micro frontend application with shared routing, navigation, and state"
+---
+
+The app shell pattern gives every micro frontend a consistent chrome — navigation, layout, and shared state — while letting each remote own its own routes and deploy independently. From the user's perspective there is one application. From the team's perspective each vertical is fully autonomous.
+
+## The app shell pattern
+
+In a federated app shell:
+
+- The **shell** owns the layout, top-level router, and shared state. It imports route segments lazily from remotes.
+- Each **remote** exposes a route service or page component and also runs as a fully standalone application on its own port.
+- Shared libraries (React, a UI component library, routing) are declared as singletons so every part of the application uses the same instance.
+
+Because every remote includes the shell in its own `remotes` and renders it directly, visiting any remote's port produces an experience identical to the full shell. This is the key property that makes micro frontends independently deployable without sacrificing UX consistency.
+
+## The `shared-routing` example
+
+This example has five applications: a shell and four feature remotes.
+
+| App       | Port | Role                  |
+| --------- | ---- | --------------------- |
+| shell     | 3000 | App shell (host)      |
+| dashboard | 3001 | Standalone remote     |
+| order     | 3002 | Standalone remote     |
+| sales     | 3003 | Standalone remote     |
+| profile   | 3004 | Standalone remote     |
+
+Every URL (3000–3004) renders the full shell with the correct active route.
+
+### Shell webpack config
+
+The shell exposes itself (`./Shell` and `./Service`) so that remotes can import the shell layout and render it directly.
+
+```js shared-routing/shell/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const deps = require('./package.json').dependencies;
+
+new ModuleFederationPlugin({
+  name: 'shell',
+  filename: 'remoteEntry.js',
+  remotes: {
+    order: 'order@http://localhost:3002/remoteEntry.js',
+    dashboard: 'dashboard@http://localhost:3001/remoteEntry.js',
+    profile: 'profile@http://localhost:3004/remoteEntry.js',
+    shell: 'shell@http://localhost:3000/remoteEntry.js',
+  },
+  exposes: {
+    './Shell': './src/Shell',
+    './Service': './src/Service',
+  },
+  shared: [
+    {
+      react: {
+        singleton: true,
+        requiredVersion: deps.react,
+      },
+      'react-dom': {
+        singleton: true,
+        requiredVersion: deps['react-dom'],
+      },
+      '@material-ui/core': {
+        singleton: true,
+        requiredVersion: deps['@material-ui/core'],
+      },
+    },
+    './src/Service',
+  ],
+})
+```
+
+### Dashboard remote webpack config
+
+The dashboard remote also imports both the shell and itself. The self-reference (`dashboard: 'dashboard@http://localhost:3001/remoteEntry.js'`) lets the remote resolve its own modules via the federation runtime — the same technique used by the shell.
+
+```js shared-routing/dashboard/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const deps = require('./package.json').dependencies;
+
+new ModuleFederationPlugin({
+  name: 'dashboard',
+  filename: 'remoteEntry.js',
+  remotes: {
+    order: 'order@http://localhost:3002/remoteEntry.js',
+    sales: 'sales@http://localhost:3003/remoteEntry.js',
+    shell: 'shell@http://localhost:3000/remoteEntry.js',
+    dashboard: 'dashboard@http://localhost:3001/remoteEntry.js',
+  },
+  exposes: {
+    './DashboardService': './src/DashboardService',
+  },
+  shared: {
+    react: {
+      singleton: true,
+      requiredVersion: deps.react,
+    },
+    'react-dom': {
+      singleton: true,
+      requiredVersion: deps['react-dom'],
+    },
+    '@material-ui/core': {
+      singleton: true,
+      requiredVersion: deps['@material-ui/core'],
+    },
+  },
+})
+```
+
+### How the shell loads federated routes
+
+The shell's `Shell.js` component lazy-imports route services from remotes and renders them inside a `BrowserRouter`. Each `React.lazy` import resolves from the remote container at runtime.
+
+```jsx shared-routing/shell/src/Shell.js
+import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import AppDrawer from './AppDrawer';
+import AppBar from './AppBar';
+import Viewport from './Viewport';
+import { useLocalStorageSync } from './useLocalStorageSync';
+import { ServiceProvider } from './Service';
+
+const DashboardService = React.lazy(() => import('dashboard/DashboardService'));
+const OrderService = React.lazy(() => import('order/OrderService'));
+const ProfilePage = React.lazy(() => import('profile/ProfilePage'));
+
+export default function Shell() {
+  const drawer = useDrawer();
+
+  return (
+    <ServiceProvider>
+      <BrowserRouter>
+        <Viewport>
+          <Box display="flex" flex={1}>
+            <AppBar drawer={drawer} />
+            <AppDrawer drawer={drawer} />
+            <React.Suspense fallback={'Loading'}>
+              <Routes>
+                <Route path="dashboard/*" element={<DashboardService />} />
+                <Route path="orders/*" element={<OrderService />} />
+                <Route path="profile/*" element={<ProfilePage />} />
+                <Route path="*" element={<Navigate to="/dashboard" replace />} />
+              </Routes>
+            </React.Suspense>
+          </Box>
+        </Viewport>
+      </BrowserRouter>
+    </ServiceProvider>
+  );
+}
+```
+
+### Running the example
+
+```bash
+cd shared-routing
+pnpm start
+```
+
+Open any port from 3000 to 3004 — each renders the full shell with its own route active.
+
+## Shared routes across two apps (`shared-routes2`)
+
+The `shared-routes2` example shows a simpler two-app pattern where route ownership is split across deployments:
+
+- `app1` (port 3001) owns the `/` (Home) route and exposes `Navigation` and `routes`.
+- `app2` (port 3002) owns the `/about` route.
+
+`app1` uses a promise-based remote declaration to gracefully handle the case where `app2` is offline:
+
+```js shared-routes2/app1/webpack.config.js
+remotes: {
+  app2: `promise new Promise(function (resolve, reject) {
+    var __webpack_error__ = new Error()
+    if (typeof window["app2"] !== 'undefined') return resolve();
+    __webpack_require__.l(
+      "http://localhost:3002/remoteEntry.js",
+      function (event) {
+        if (typeof app2 !== 'undefined') return resolve();
+        var errorType = event && (event.type === 'load' ? 'missing' : event.type);
+        __webpack_error__.message =
+          'Loading script failed.\\n(' + errorType + ': ' + realSrc + ')';
+        __webpack_error__.name = 'ScriptExternalLoadError';
+        reject(__webpack_error__);
+      },
+      "app2",
+    );
+  }).then(function(){
+    return { get: app2.get, init: app2.init }
+  }).catch(function(e) {
+    console.log('rejected');
+    return { get: (module, scope) => () => [], init: () => {} }
+  })`,
+},
+```
+
+React and React DOM are also set to `eager: true` in this example so they are synchronously available before any dynamic import:
+
+```js shared-routes2/app1/webpack.config.js
+shared: {
+  react: {
+    eager: true,
+    singleton: true,
+    requiredVersion: deps.react,
+  },
+  'react-dom': {
+    eager: true,
+    singleton: true,
+    requiredVersion: deps['react-dom'],
+  },
+},
+```
+
+## Shared context
+
+The `shared-context` example demonstrates passing React context across the federation boundary. A `shared-library` package exposes a `NameContextProvider`. Both `app1` (host) and `app2` (remote) declare it as a shared singleton, ensuring the context object is identical in both.
+
+```js shared-context/app1/webpack.config.js
+shared: {
+  react: { singleton: true, requiredVersion: deps.react },
+  'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+  'shared-context_shared-library': {
+    import: 'shared-context_shared-library',
+    requiredVersion: require('../shared-library/package.json').version,
+    singleton: true,
+  },
+},
+```
+
+`app1` wraps its tree in the provider with a value. `app2/Welcome` reads from that context via `React.useContext`:
+
+<CodeGroup>
+
+```jsx shared-context/app1/src/App.js
+import { NameContextProvider } from 'shared-context_shared-library';
+import React from 'react';
+
+const Welcome = React.lazy(() => import('app2/Welcome'));
+
+const App = () => (
+  <div>
+    <h1>Context Provider</h1>
+    <NameContextProvider.Provider value="Billy">
+      <React.Suspense fallback="Loading Name">
+        <Welcome />
+      </React.Suspense>
+    </NameContextProvider.Provider>
+  </div>
+);
+```
+
+```jsx shared-context/app2/src/Welcome.js
+import { NameContextProvider } from 'shared-context_shared-library';
+import React from 'react';
+
+const Welcome = () => {
+  const name = React.useContext(NameContextProvider);
+  return <p>Welcome, {name}</p>;
+};
+
+export default Welcome;
+```
+
+</CodeGroup>
+
+<Note>
+  Context sharing only works when both apps resolve to the exact same module instance. Declaring the shared library as a singleton with an explicit `requiredVersion` prevents the federation runtime from loading two separate copies.
+</Note>
+
+## Key patterns
+
+<CardGroup cols={2}>
+  <Card title="Lazy route loading" icon="bolt">
+    Wrap every federated route segment in `React.lazy` + `React.Suspense`. This defers the network request for a remote's bundle until the user navigates to that route.
+  </Card>
+  <Card title="Navigation ownership" icon="map">
+    The shell owns the top-level navigation. Remotes expose page or service components, not navigation chrome. This prevents multiple navigation bars from appearing when a remote renders standalone.
+  </Card>
+  <Card title="Self-referencing remotes" icon="rotate">
+    Each app lists itself as a remote. This lets the federation runtime resolve the app's own modules consistently through the share scope rather than duplicating them in the bundle.
+  </Card>
+  <Card title="Shared state via service modules" icon="database">
+    Expose a `Service` module from the shell that wraps shared state (e.g., a context or store). Remotes import it lazily and participate in the same state graph without bundling a copy.
+  </Card>
+</CardGroup>

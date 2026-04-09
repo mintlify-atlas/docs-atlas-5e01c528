@@ -1,0 +1,306 @@
+---
+title: "Bi-Directional Federation"
+description: "Both applications expose and consume modules from each other simultaneously"
+---
+
+## Overview
+
+In bi-directional federation, each application acts as both a host and a remote at the same time. Neither app is purely a consumer — both expose modules and both consume from the other.
+
+| App  | Port | Exposes              | Consumes            |
+| ---- | ---- | -------------------- | ------------------- |
+| app1 | 3001 | `./Button` (red)     | `app2/Button` (blue)|
+| app2 | 3002 | `./Button` (blue)    | `app1/Button` (red) |
+
+This means app1 renders app2's blue button, and app2 renders app1's red button — each fetched at runtime from the other application's manifest.
+
+## Tech stack
+
+<CardGroup cols={3}>
+  <Card title="Modern.js" icon="layer-group">
+    Full-stack React framework providing routing, server configuration, and dev tooling.
+  </Card>
+  <Card title="@module-federation/modern-js" icon="puzzle-piece">
+    The `moduleFederationPlugin` integration for Modern.js, replacing manual `tools.webpack` configuration.
+  </Card>
+  <Card title="Rspack" icon="bolt">
+    Rust-based bundler used via `bundler: 'experimental-rspack'` to avoid webpack schema incompatibilities during package refreshes.
+  </Card>
+</CardGroup>
+
+## Configuration
+
+Both apps use the `moduleFederationPlugin` from `@module-federation/modern-js`. Unlike the basic example, the federation config is passed directly to the plugin rather than through `tools.webpack`.
+
+<CodeGroup>
+
+```js app1/modern.config.js
+import { appTools, defineConfig } from '@modern-js/app-tools';
+import { moduleFederationPlugin } from '@module-federation/modern-js';
+
+export default defineConfig({
+  dev: {
+    port: 3001,
+  },
+  server: {
+    port: 3001,
+    ssr: false, // Disable SSR completely for client-side rendering
+  },
+  runtime: {
+    router: true,
+  },
+  source: {
+    enableAsyncEntry: true, // Ensure async entry for module federation
+  },
+  tools: {
+    devServer: {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      },
+    },
+  },
+  plugins: [
+    // Use rspack to avoid webpack schema incompatibilities during package refreshes.
+    appTools({ bundler: 'experimental-rspack' }),
+    // Pass MF config directly to avoid relying on external module-federation config files.
+    moduleFederationPlugin({
+      config: {
+        experiments: { asyncStartup: true },
+        shareStrategy: 'loaded-first',
+        name: 'app1',
+        remotes: {
+          app2: 'app2@http://localhost:3002/mf-manifest.json',
+        },
+        exposes: {
+          './Button': './src/components/button.js',
+        },
+        shared: {
+          react: { singleton: true },
+          'react-dom': { singleton: true },
+        },
+        dts: false,
+      },
+    }),
+  ],
+});
+```
+
+```js app2/modern.config.js
+import { appTools, defineConfig } from '@modern-js/app-tools';
+import { moduleFederationPlugin } from '@module-federation/modern-js';
+
+export default defineConfig({
+  dev: {
+    port: 3002,
+  },
+  server: {
+    port: 3002,
+    ssr: false, // Disable SSR completely for client-side rendering
+  },
+  runtime: {
+    router: true,
+  },
+  source: {
+    enableAsyncEntry: true, // Ensure async entry for module federation
+  },
+  tools: {
+    devServer: {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      },
+    },
+  },
+  plugins: [
+    // Use rspack to avoid webpack schema incompatibilities during package refreshes.
+    appTools({ bundler: 'experimental-rspack' }),
+    // Pass MF config directly to avoid relying on external module-federation config files.
+    moduleFederationPlugin({
+      config: {
+        experiments: { asyncStartup: true },
+        shareStrategy: 'loaded-first',
+        name: 'app2',
+        remotes: {
+          app1: 'app1@http://localhost:3001/mf-manifest.json',
+        },
+        exposes: {
+          './Button': './src/components/button.js',
+        },
+        shared: {
+          react: { singleton: true },
+          'react-dom': { singleton: true },
+        },
+        dts: false,
+      },
+    }),
+  ],
+});
+```
+
+</CodeGroup>
+
+### Notable config options
+
+- **`mf-manifest.json`** — the `moduleFederationPlugin` generates a richer manifest format compared to `remoteEntry.js`. It includes module metadata, type information, and is the preferred entry point when using `@module-federation/modern-js`.
+- **`shareStrategy: 'loaded-first'`** — uses whichever version of a shared module was loaded first, rather than the highest compatible version. This avoids re-fetching modules that are already initialized.
+- **`experiments.asyncStartup: true`** — defers container initialization until async dependencies are resolved, which is required when two containers depend on each other.
+- **CORS headers** — because each app loads modules from the other's origin, permissive CORS headers are set on the dev server.
+
+## The exposed components
+
+Each app exposes its own `Button` component with a distinct color.
+
+<CodeGroup>
+
+```js app1/src/components/button.js
+import React from 'react';
+
+const style = {
+  background: '#800',
+  color: '#fff',
+  padding: 12,
+};
+
+const Button = () => <button style={style}>App 1 Button</button>;
+
+export default Button;
+```
+
+```js app2/src/components/button.js
+import React from 'react';
+
+const style = {
+  background: '#00c',
+  color: '#fff',
+  padding: 12,
+};
+
+const Button = () => <button style={style}>App 2 Button</button>;
+
+export default Button;
+```
+
+</CodeGroup>
+
+## Consuming the remote component
+
+Both apps use `React.lazy` and `Suspense` to load the other app's `Button` asynchronously. This is the recommended pattern for remote components because the module is not available until the remote container is fetched.
+
+<CodeGroup>
+
+```jsx app1/src/routes/page.jsx
+import { Suspense, lazy } from 'react';
+
+const Button = lazy(() => import('app2/Button'));
+
+const Index = () => (
+  <div className="container-box">
+    <main>
+      <p className="description">
+        FEDERATED:{' '}
+        <Suspense fallback={<div>Loading Button...</div>}>
+          <Button />
+        </Suspense>
+      </p>
+    </main>
+  </div>
+);
+
+export default Index;
+```
+
+```jsx app2/src/routes/page.jsx
+import { Suspense, lazy } from 'react';
+
+const Button = lazy(() => import('app1/Button'));
+
+const Index = () => (
+  <div className="container-box">
+    <main>
+      <p className="description">
+        FEDERATED App1:{' '}
+        <Suspense fallback={<div>Loading Button...</div>}>
+          <Button />
+        </Suspense>
+      </p>
+    </main>
+  </div>
+);
+
+export default Index;
+```
+
+</CodeGroup>
+
+<Tip>
+  The `Suspense` fallback displays while the remote container is being fetched. Without it, React will throw if the lazy component hasn't resolved yet.
+</Tip>
+
+## Running the example
+
+<Steps>
+  <Step title="Navigate to the example directory">
+    ```bash
+    cd bi-directional
+    ```
+  </Step>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Start both applications">
+    ```bash
+    pnpm start
+    ```
+
+    Both apps must be running at the same time. app1 will fail to load app2's button if app2 is not running, and vice versa.
+  </Step>
+  <Step title="Open the applications">
+    | URL                   | What you see                                  |
+    | --------------------- | --------------------------------------------- |
+    | http://localhost:3001 | app1 rendering the blue button loaded from app2 |
+    | http://localhost:3002 | app2 rendering the red button loaded from app1  |
+  </Step>
+</Steps>
+
+## E2E testing with Playwright
+
+The example includes Playwright tests that verify both apps render their federated buttons correctly.
+
+```bash
+pnpm test:e2e
+```
+
+Playwright starts both dev servers automatically (via `webServer` in `playwright.config.ts`) and runs the tests against Chromium. On CI, the build is run first:
+
+```bash
+pnpm e2e:ci
+```
+
+<Note>
+  The Playwright config sets a 240-second test timeout and a 180-second web server startup timeout. Rspack compilation can be slow on first run, especially in CI environments.
+</Note>
+
+## When to use bi-directional vs one-way federation
+
+<Tabs>
+  <Tab title="Use bi-directional when">
+    - Two teams need to share components with each other and neither team should own a shared library
+    - You are building a micro frontend shell where sibling applications need to render components from each other
+    - You want to avoid a dedicated "shared component" application that becomes a deployment bottleneck
+  </Tab>
+  <Tab title="Use one-way federation when">
+    - There is a clear host/consumer relationship (a shell app consuming feature apps)
+    - You want simpler dependency graphs and easier debugging
+    - Only one direction of sharing is needed — a remote exposes components and one or more hosts consume them
+    - You are getting started with Module Federation for the first time (see the [basic host/remote example](/examples/basic-host-remote))
+  </Tab>
+</Tabs>
+
+<Warning>
+  Bi-directional federation creates a mutual dependency between containers. Both applications must be running for either one to fully render. Plan your deployment and health check strategy accordingly.
+</Warning>

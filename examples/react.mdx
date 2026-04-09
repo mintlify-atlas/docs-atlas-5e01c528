@@ -1,0 +1,413 @@
+---
+title: "React"
+description: "Module Federation examples for React applications — from basic components to code splitting and Storybook integration"
+---
+
+React is the most widely used framework in the Module Federation ecosystem. These examples cover the full spectrum from simple component sharing to multi-tier library federation and Storybook integration.
+
+<CardGroup cols={2}>
+  <Card title="Complete React case" icon="layer-group" href="https://github.com/module-federation/module-federation-examples/tree/master/complete-react-case">
+    Multi-app federation with a dedicated library remote, component remote, and host app.
+  </Card>
+  <Card title="React 18 code splitting" icon="scissors" href="https://github.com/module-federation/module-federation-examples/tree/master/react-18-code-splitting">
+    Lazy-load federated components with React.Suspense and SSR support.
+  </Card>
+  <Card title="React Storybook" icon="book-open" href="https://github.com/module-federation/module-federation-examples/tree/master/react-storybook">
+    Write Storybook stories for components loaded from a federated remote.
+  </Card>
+  <Card title="React version management" icon="code-branch" href="https://github.com/module-federation/module-federation-examples/tree/master/different-react-versions">
+    Run multiple React versions side by side with explicit version pinning.
+  </Card>
+</CardGroup>
+
+---
+
+## Complete React case study
+
+The `complete-react-case` example models a realistic production architecture with three cooperating apps.
+
+| App | Role | Port |
+|-----|------|------|
+| `lib-app` | Pure remote — exposes `react` and `react-dom` as federation modules | 3000 |
+| `component-app` | Remote + host — consumes `lib-app`, exposes `Button`, `Dialog`, `Logo`, `ToolTip` | 3001 |
+| `main-app` | Pure host — consumes `lib-app` and `component-app` | 3002 |
+
+### lib-app — exposing React itself
+
+By hosting React in its own federated remote you guarantee a single copy of React across every app that depends on `lib-app`.
+
+```javascript lib-app/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+module.exports = {
+  entry: './index.js',
+  output: {
+    publicPath: 'http://localhost:3000/',
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'lib_app',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './react': 'react',
+        './react-dom': 'react-dom',
+      },
+    }),
+  ],
+};
+```
+
+### component-app — exposing UI components
+
+`component-app` consumes React from `lib-app` and exposes its own components upward to `main-app`.
+
+```javascript component-app/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+module.exports = {
+  entry: './index.js',
+  output: {
+    publicPath: 'http://localhost:3001/',
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'component_app',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './Button': './src/Button.jsx',
+        './Dialog': './src/Dialog.jsx',
+        './Logo': './src/Logo.jsx',
+        './ToolTip': './src/ToolTip.jsx',
+      },
+      remotes: {
+        'lib-app': 'lib_app@http://localhost:3000/remoteEntry.js',
+      },
+    }),
+  ],
+};
+```
+
+### main-app — consuming remote components
+
+`main-app` imports React from `lib-app` and UI components from `component-app` using standard ES import syntax — no special API required at the call site.
+
+```javascript main-app/webpack.config.js
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'main_app',
+  remotes: {
+    'lib-app': 'lib_app@http://localhost:3000/remoteEntry.js',
+    'component-app': 'component_app@http://localhost:3001/remoteEntry.js',
+  },
+}),
+```
+
+```jsx main-app/App.jsx
+import React from 'lib-app/react';
+import Button from 'component-app/Button';
+import Dialog from 'component-app/Dialog';
+import ToolTip from 'component-app/ToolTip';
+
+export default class App extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { dialogVisible: false };
+    this.handleClick = this.handleClick.bind(this);
+    this.handleSwitchVisible = this.handleSwitchVisible.bind(this);
+  }
+
+  render() {
+    return (
+      <div>
+        <Button type="primary" />
+        <Button type="warning" />
+        <button onClick={this.handleClick}>click me to open Dialog</button>
+        <Dialog switchVisible={this.handleSwitchVisible} visible={this.state.dialogVisible} />
+        <ToolTip content="hover me please" message="Hello,world!" />
+      </div>
+    );
+  }
+}
+```
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Start all apps">
+    ```bash
+    pnpm run start
+    ```
+  </Step>
+  <Step title="Open the host">
+    Visit `http://localhost:3002` and open DevTools → Network to observe that React is served from `lib-app` at port 3000.
+  </Step>
+</Steps>
+
+---
+
+## Code splitting with React.lazy and Suspense
+
+The `react-18-code-splitting` example demonstrates lazy-loading federated modules using `React.lazy` paired with `React.Suspense`. Both client and server (SSR) bundles are emitted via separate webpack configurations.
+
+<Tabs>
+  <Tab title="app2 — exposes Content">
+    ```javascript app2/config/module-federation.js
+    const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+
+    module.exports = {
+      client: new ModuleFederationPlugin({
+        experiments: { asyncStartup: true },
+        name: 'app2',
+        filename: 'remoteEntry.js',
+        exposes: {
+          './Content': './src/client/components/Content',
+        },
+        shared: [{ react: deps.react, 'react-dom': deps['react-dom'] }],
+      }),
+      server: [
+        new ModuleFederationPlugin({
+          remoteType: 'script',
+          runtimePlugins: [require.resolve('@module-federation/node/runtimePlugin')],
+          name: 'app2',
+          library: { type: 'commonjs-module' },
+          filename: 'remoteEntry.js',
+          exposes: {
+            './Content': './src/client/components/Content',
+          },
+          shared: [{ react: deps.react, 'react-dom': deps['react-dom'] }],
+        }),
+      ],
+    };
+    ```
+  </Tab>
+  <Tab title="app1 — lazy-loads Content">
+    ```javascript app1/config/module-federation.js
+    const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+
+    module.exports = {
+      client: new ModuleFederationPlugin({
+        experiments: { asyncStartup: true },
+        name: 'app1',
+        filename: 'remoteEntry.js',
+        remotes: {
+          app2: 'app2@http://localhost:3001/static/remoteEntry.js',
+        },
+        shared: [{ react: deps.react, 'react-dom': deps['react-dom'] }],
+      }),
+      server: [
+        new ModuleFederationPlugin({
+          remoteType: 'script',
+          runtimePlugins: [require.resolve('@module-federation/node/runtimePlugin')],
+          name: 'app1',
+          library: { type: 'commonjs-module' },
+          filename: 'remoteEntry.js',
+          remotes: {
+            app2: 'app2@http://localhost:3001/server/remoteEntry.js',
+          },
+          shared: [{ react: deps.react, 'react-dom': deps['react-dom'] }],
+        }),
+      ],
+    };
+    ```
+  </Tab>
+</Tabs>
+
+### Suspense pattern for lazy-loaded federated components
+
+`app1` wraps the remote `Content` component with `React.lazy` and renders it inside a `Suspense` boundary. The component is not fetched until the user clicks "Toggle Content".
+
+```tsx app1/src/client/components/App.tsx
+import React from 'react';
+import type { ContentProps } from 'app2/Content';
+
+const Content = React.lazy(
+  () => import('app2/Content') as Promise<{ default: React.FC<ContentProps> }>,
+);
+
+const App = () => {
+  const [state, setState] = React.useState<string>('');
+  const [isVisible, setIsVisible] = React.useState<boolean>(false);
+
+  return (
+    <div>
+      <input
+        type="text"
+        value={state}
+        onChange={e => setState(e.target.value)}
+        placeholder="Luke, I am your father..."
+      />
+      <button onClick={() => setIsVisible(value => !value)}>Toggle Content</button>
+
+      {isVisible && (
+        <React.Suspense fallback={<h1>Loading....</h1>}>
+          <Content content={state} />
+        </React.Suspense>
+      )}
+    </div>
+  );
+};
+
+export default App;
+```
+
+<Note>
+  The `fallback` prop on `Suspense` is rendered while the remote chunk is being downloaded. Keep fallback UIs lightweight — a spinner or skeleton is preferred over a full page placeholder.
+</Note>
+
+| App | Port |
+|-----|------|
+| app1 (host) | 3000 |
+| app2 (remote) | 3001 |
+
+---
+
+## Storybook with federated components
+
+The `react-storybook` example shows how to write Storybook stories that consume a component from a live federated remote. The `remote` app exposes a `Button` component; the `host` app loads it lazily inside a `Suspense` wrapper and writes stories against it.
+
+<Tabs>
+  <Tab title="remote config">
+    ```javascript remote/modulefederation.config.js
+    const { dependencies } = require('./package.json');
+
+    module.exports = {
+      name: 'remote',
+      exposes: {
+        './Button': './src/Button',
+      },
+      filename: 'remoteEntry.js',
+      shared: {
+        ...dependencies,
+        react: {
+          singleton: true,
+          requiredVersion: dependencies['react'],
+        },
+        'react-dom': {
+          singleton: true,
+          requiredVersion: dependencies['react-dom'],
+        },
+      },
+    };
+    ```
+  </Tab>
+  <Tab title="host config">
+    ```javascript host/modulefederation.config.js
+    const { dependencies } = require('./package.json');
+
+    module.exports = {
+      name: 'host',
+      remotes: {
+        remote: 'remote@http://localhost:3002/remoteEntry.js',
+      },
+      shared: {
+        ...dependencies,
+        react: {
+          singleton: true,
+          requiredVersion: dependencies['react'],
+        },
+        'react-dom': {
+          singleton: true,
+          requiredVersion: dependencies['react-dom'],
+        },
+      },
+    };
+    ```
+  </Tab>
+</Tabs>
+
+The remote `Button` component itself uses `React.forwardRef` so it integrates cleanly with Storybook's controls:
+
+```javascript remote/src/Button.js
+import React from 'react';
+import classNames from 'classnames';
+import styles from './Button.module.css';
+
+const Button = React.forwardRef(
+  ({ children, className, variant = 'primary', Icon, ...props }, ref) => {
+    const cssClasses = classNames(styles.button, {
+      [styles.primary]: variant === 'primary',
+      [styles.secondary]: variant === 'secondary',
+    });
+
+    return (
+      <button {...props} ref={ref} className={`${cssClasses} ${className}`}>
+        <span>{children}</span>
+        {Icon && <Icon className={styles.icon} />}
+      </button>
+    );
+  },
+);
+
+export default Button;
+```
+
+In the host's Storybook, the federated `Button` is loaded with `React.lazy` and wrapped in `Suspense`:
+
+```jsx host/src/Button.stories.jsx
+import React, { Suspense } from 'react';
+
+const LazyButton = React.lazy(() => import('remote/Button'));
+
+const Button = props => (
+  <Suspense fallback={<p>Please wait...</p>}>
+    <LazyButton {...props} />
+  </Suspense>
+);
+
+export default {
+  title: 'Remote/Button',
+  component: Button,
+  argTypes: {
+    variant: { control: 'select', options: ['primary', 'secondary'] },
+  },
+};
+
+export const Primary = args => <Button {...args} />;
+Primary.args = { variant: 'primary', children: 'Button' };
+
+export const Secondary = args => <Button {...args} />;
+Secondary.args = { variant: 'secondary', children: 'Button' };
+```
+
+<Steps>
+  <Step title="Start both apps">
+    ```bash
+    pnpm run start
+    ```
+    The remote serves at `localhost:3002` and the host Storybook at `localhost:3000`.
+  </Step>
+  <Step title="Open Storybook">
+    Visit `http://localhost:3000` to see stories that render the live federated `Button`.
+  </Step>
+</Steps>
+
+---
+
+## Key considerations
+
+<AccordionGroup>
+  <Accordion title="React must be a singleton">
+    React uses module-level state (hooks, context, refs). If two copies of React exist in the same page, hooks will throw and context will not cross the boundary. Mark `react` and `react-dom` as `singleton: true` in every app's shared configuration.
+
+    ```javascript
+    shared: {
+      react: { singleton: true, requiredVersion: deps.react },
+      'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+    }
+    ```
+  </Accordion>
+  <Accordion title="Version conflict behaviour">
+    When `singleton: true` is set, Module Federation logs a warning at runtime if the loaded version does not satisfy `requiredVersion`, but it still uses the single instance rather than loading a second copy. Add `strictVersion: true` to turn the warning into a hard error.
+  </Accordion>
+  <Accordion title="Async boundary required">
+    Module Federation initialises asynchronously. Wrap your root render in a dynamic import (a `bootstrap.js` indirection) or enable `experiments.asyncStartup: true` on the plugin to avoid "Shared module is not available for eager consumption" errors.
+  </Accordion>
+  <Accordion title="Different React versions side by side">
+    When running two truly incompatible React versions you cannot share a singleton. Instead give each remote its own scoped `react` and do not mark it as a singleton. The `different-react-versions` example demonstrates this pattern.
+  </Accordion>
+</AccordionGroup>

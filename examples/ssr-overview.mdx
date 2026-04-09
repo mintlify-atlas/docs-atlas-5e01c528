@@ -1,0 +1,210 @@
+---
+title: "Server-Side Rendering overview"
+description: "Understanding the challenges and solutions for Server-Side Rendering with Module Federation"
+---
+
+Server-Side Rendering (SSR) with Module Federation is significantly more complex than client-side federation. This page explains why, and helps you choose the right approach for your use case.
+
+## Why SSR with Module Federation is complex
+
+Client-side federation is straightforward: the browser loads a `remoteEntry.js` file asynchronously, and Webpack orchestrates which modules come from which remote. The async nature of the browser environment is a natural fit.
+
+On the server, two fundamental constraints collide:
+
+<AccordionGroup>
+  <Accordion title="Module loading is async; SSR is synchronous">
+    Webpack's federation runtime resolves remote modules asynchronously — it needs to fetch remote manifests and load the correct chunks before modules are available. Node.js `require()` is synchronous. There is no built-in mechanism for the Node.js module system to "pause" while a remote is fetched.
+
+    The solution is to use an async entry point on the server (an async boundary before any federated import), combined with server-specific plugins such as `NodeFederationPlugin`, `StreamingTargetPlugin`, or `UniversalFederationPlugin` from `@module-federation/node`.
+  </Accordion>
+
+  <Accordion title="Server and client bundles need separate federation configs">
+    A typical SSR app produces two bundles: one for Node.js (server) and one for the browser (client). Each bundle must have its own `ModuleFederationPlugin` configuration because:
+
+    - The server bundle must use `commonjs-module` as its library type so modules are `require()`-able
+    - The server's `remotes` must point to the server-side `remoteEntry.js` of each remote (usually at a different path than the client entry)
+    - The client bundle uses the standard browser-compatible config
+
+    Both bundles must be kept in sync so that the server-rendered HTML hydrates correctly on the client.
+  </Accordion>
+</AccordionGroup>
+
+## Available approaches
+
+This repository contains several working SSR examples, each targeting a different use case.
+
+<CardGroup cols={2}>
+  <Card title="React Suspense SSR" icon="server" href="/examples/react-18-ssr">
+    **`server-side-rendering`** and **`react-18-ssr`** — webpack-based SSR using `NodeFederationPlugin` / `UniversalFederationPlugin` and React Suspense. Works with any Node.js server framework.
+  </Card>
+  <Card title="React 18 streaming SSR" icon="chart-waterfall" href="/examples/react-18-ssr">
+    **`react-18-ssr`** — builds on the Suspense pattern with React 18's `renderToPipeableStream` for true HTML streaming. Uses `UniversalFederationPlugin` from `@module-federation/node`.
+  </Card>
+  <Card title="Next.js federation" icon="n" href="/examples/nextjs">
+    **`nextjs-csr`** and **`nextjs-dynamic-ssr`** — `@module-federation/nextjs-mf` plugin integrates federation into the Next.js webpack pipeline. Note that support for this plugin is ending.
+  </Card>
+  <Card title="Modern.js SSR" icon="bolt" href="/examples/ssr-overview#modernjs-ssr">
+    **`modernjs-ssr`** — uses `@module-federation/modern-js` with Rspack and Modern.js streaming SSR. The simplest configuration for full-stack Module Federation.
+  </Card>
+</CardGroup>
+
+## Choosing the right approach
+
+| Approach | React version | Bundle tool | Best for |
+| --- | --- | --- | --- |
+| `server-side-rendering` | 16+ | Webpack | Custom Node.js servers, React Suspense |
+| `react-18-ssr` | 18 | Webpack | Streaming HTML, `renderToPipeableStream` |
+| `react-16-17-18-ssr` | 16, 17, or 18 | Webpack | Mixed-version micro frontend environments |
+| `nextjs-csr` / `nextjs-dynamic-ssr` | 18 (Next.js) | Next.js (Webpack) | Existing Next.js apps (note: support ending) |
+| `modernjs-ssr` | 18 | Rspack | New projects using Modern.js framework |
+| `federated-css-react-ssr` | 16+ | Webpack | SSR with CSS Modules, JSS, or styled-components |
+
+<Tip>
+  If you are starting a new project, prefer the `modernjs-ssr` or `react-18-ssr` approach. Both use actively maintained packages and support streaming HTML out of the box.
+</Tip>
+
+## Modern.js SSR
+
+The `modernjs-ssr` example is the most concise SSR setup. The `@module-federation/modern-js` plugin handles both server and client bundle configuration automatically.
+
+**Provider** (`modernjs-ssr/provider`, port 3006):
+
+```typescript modernjs-ssr/provider/modern.config.ts
+import { appTools, defineConfig } from '@modern-js/app-tools';
+import { moduleFederationPlugin } from '@module-federation/modern-js';
+
+export default defineConfig({
+  server: {
+    ssr: { mode: 'stream' },
+    port: 3006,
+  },
+  plugins: [
+    appTools({ bundler: 'experimental-rspack' }),
+    moduleFederationPlugin({
+      config: {
+        name: 'provider',
+        filename: 'remoteEntry.js',
+        exposes: {
+          './Image': './src/components/Image.tsx',
+        },
+        shared: {
+          react: { singleton: true },
+          'react-dom': { singleton: true },
+        },
+      },
+    }),
+  ],
+});
+```
+
+**Consumer** (`modernjs-ssr/host`, port 3007):
+
+```typescript modernjs-ssr/host/modern.config.ts
+import { appTools, defineConfig } from '@modern-js/app-tools';
+import { moduleFederationPlugin } from '@module-federation/modern-js';
+
+export default defineConfig({
+  server: {
+    ssr: { mode: 'stream' },
+    port: 3007,
+  },
+  plugins: [
+    appTools({ bundler: 'experimental-rspack' }),
+    moduleFederationPlugin({
+      config: {
+        name: 'consumer',
+        remotes: {
+          remote: 'provider@http://localhost:3006/mf-manifest.json',
+        },
+        shared: {
+          react: { singleton: true },
+          'react-dom': { singleton: true },
+        },
+      },
+    }),
+  ],
+});
+```
+
+Run the Modern.js SSR example:
+
+```bash
+cd modernjs-ssr
+pnpm run start
+```
+
+| App | Role | URL |
+| --- | --- | --- |
+| provider | Remote | http://localhost:3006 |
+| host | Consumer | http://localhost:3007 |
+
+## Security considerations
+
+<Warning>
+  SSR federation exposes server-side code over the network. This is fundamentally different from client-side federation, where only browser-safe bundles are served.
+</Warning>
+
+The `@module-federation/nextjs-mf` plugin exposes CommonJS server modules at `_next/static/ssr*`. Anyone who can reach that path can read your server code — including secrets, API keys, and logic that was never meant to be public. The same concern applies to any server-side `remoteEntry.js`.
+
+Mitigations:
+
+- Restrict access to SSR static paths at the CDN or reverse proxy layer (allow only internal network or VPN)
+- Do not import server secrets (database credentials, signing keys) inside modules that are exposed via federation
+- Remember that `process.browser` tree-shaking does **not** apply to server bundles — there is no automatic removal of browser-only code paths
+- Only federate trusted code between trusted servers until stream encryption support is available
+
+## CSS federation in SSR
+
+The `federated-css-react-ssr` example covers three styling strategies that require special handling during server rendering:
+
+<Tabs>
+  <Tab title="isomorphic-style-loader">
+    Expose `StyleContext` from each remote alongside your components. In the shell's render function, create an `insertCss` collector and pass it through the context provider before calling `renderToString`.
+
+    ```javascript
+    // shell-apps/*/server/render.js (simplified)
+    const css = new Set();
+    const insertCss = (...styles) => styles.forEach(style => css.add(style._getCss()));
+    const html = renderToString(
+      <Compose providers={[[StyleContext, { value: { insertCss } }]]}>
+        <App />
+      </Compose>
+    );
+    // Inject collected CSS into <head>
+    ```
+  </Tab>
+  <Tab title="react-jss">
+    Share `react-jss` as a singleton and use `JssProvider` with a `SheetsRegistry` instance during server rendering. Extract CSS from the registry after `renderToString`.
+
+    ```javascript
+    const sheets = new SheetsRegistry();
+    const html = renderToString(
+      <JssProvider registry={sheets}><App /></JssProvider>
+    );
+    const css = sheets.toString();
+    ```
+
+    In the remote's federation config:
+    ```javascript
+    shared: {
+      'react-jss': { singleton: true },
+    }
+    ```
+  </Tab>
+  <Tab title="styled-components">
+    Share `styled-components` as a singleton and use `ServerStyleSheet` to wrap `renderToString`. Call `getStyleTags()` after rendering to retrieve the style HTML.
+
+    ```javascript
+    const sheet = new ServerStyleSheet();
+    const html = renderToString(sheet.collectStyles(<App />));
+    const styleTags = sheet.getStyleTags();
+    ```
+
+    In the remote's federation config:
+    ```javascript
+    shared: {
+      'styled-components': { singleton: true },
+    }
+    ```
+  </Tab>
+</Tabs>

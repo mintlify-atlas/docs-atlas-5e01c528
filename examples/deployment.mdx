@@ -1,0 +1,214 @@
+---
+title: 'Deployment'
+description: 'Deploy federated applications independently with proper public path configuration and CDN support'
+keywords: ['module federation', 'deployment', 'publicPath', 'CDN', 'Zephyr Cloud', 'blue green', 'manifest']
+---
+
+Module Federation's core promise is independent deployability: each remote can be built, versioned, and deployed without rebuilding the host. Realizing that promise requires getting a few production details right.
+
+## Key deployment considerations
+
+<CardGroup cols={3}>
+  <Card title="publicPath" icon="link">
+    Must be set correctly so the browser can resolve `remoteEntry.js` and its chunks at runtime.
+  </Card>
+  <Card title="Independent deployability" icon="rocket">
+    Each remote ships its own `remoteEntry.js`. Hosts fetch it at runtime, not at build time.
+  </Card>
+  <Card title="Version management" icon="git-branch">
+    Blue/green deployments and traffic shifting let you roll out new remote versions without downtime.
+  </Card>
+</CardGroup>
+
+## publicPath configuration
+
+`output.publicPath` tells Webpack (or Rspack) the base URL from which the browser should load all chunks and assets. If this is wrong, remote entry files will return 404 errors in production even though the build succeeded locally.
+
+<Tabs>
+  <Tab title="auto (recommended)">
+    `'auto'` derives the public path from the URL of the script that is currently executing. This works correctly behind CDNs, load balancers, and any dynamic hosting because no URL is hardcoded at build time.
+
+    The app-shell in the `frontend-discovery-service` example uses this approach:
+
+    ```javascript webpack.config.js (app-shell)
+    const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+    const ExternalTemplateRemotesPlugin = require('external-remotes-plugin');
+
+    module.exports = {
+      entry: './src/index',
+      output: {
+        publicPath: 'auto',
+      },
+      plugins: [
+        new ModuleFederationPlugin({
+          experiments: { asyncStartup: true },
+          name: 'AppShell',
+          shared: {
+            react: { singleton: true },
+            'react-dom': { singleton: true },
+          },
+        }),
+        new ExternalTemplateRemotesPlugin(),
+      ],
+    };
+    ```
+  </Tab>
+  <Tab title="Static URL">
+    Use a static `publicPath` when the deployment URL is known at build time. This is common for dedicated CDN origins.
+
+    ```javascript webpack.config.js
+    module.exports = {
+      output: {
+        publicPath: 'https://cdn.example.com/my-remote/',
+      },
+    };
+    ```
+
+    <Warning>
+      Hardcoding a URL couples your build artifact to a specific deployment target. You will need separate builds for staging and production environments.
+    </Warning>
+  </Tab>
+  <Tab title="Rspack / Rsbuild">
+    In Rspack-based setups (such as the `react-manifest-example`), configure `assetPrefix` in development and `output.assetPrefix` in production:
+
+    ```typescript rsbuild.config.ts (remote1)
+    import { defineConfig } from '@rsbuild/core';
+    import { pluginReact } from '@rsbuild/plugin-react';
+    import { ModuleFederationPlugin } from '@module-federation/enhanced/rspack';
+
+    export default defineConfig({
+      server: { port: 3001 },
+      dev: {
+        // Derives the correct asset prefix in development
+        assetPrefix: true,
+        client: { port: 3001 },
+      },
+      tools: {
+        rspack: (config, { appendPlugins }) => {
+          config.output!.uniqueName = 'app1';
+          appendPlugins([
+            new ModuleFederationPlugin({
+              name: 'remote1',
+              exposes: {
+                './button': './src/button.tsx',
+                './app': './src/App.tsx',
+              },
+              shared: ['react', 'react-dom'],
+            }),
+          ]);
+        },
+      },
+      plugins: [pluginReact()],
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Remote manifest pattern
+
+The `react-manifest-example` uses Module Federation 2.0's manifest file (`mf-manifest.json`) instead of `remoteEntry.js`. The manifest includes version metadata, enabling the host to resolve the correct remote build without hardcoding URLs.
+
+```typescript rsbuild.config.ts (host)
+import { defineConfig } from '@rsbuild/core';
+import { pluginReact } from '@rsbuild/plugin-react';
+import { ModuleFederationPlugin } from '@module-federation/enhanced/rspack';
+
+export default defineConfig({
+  server: { port: 3000 },
+  tools: {
+    rspack: (config, { appendPlugins }) => {
+      appendPlugins([
+        new ModuleFederationPlugin({
+          name: 'host',
+          remotes: {
+            remote1: 'remote1@http://localhost:3001/mf-manifest.json',
+            remote2: 'remote2@http://localhost:3002/mf-manifest.json',
+          },
+          shared: ['react', 'react-dom'],
+        }),
+      ]);
+    },
+  },
+  plugins: [pluginReact()],
+});
+```
+
+The manifest URL is the only reference from host to remote. Swap the domain portion to point at any environment — no host rebuild required.
+
+## Environment-specific remote URLs
+
+Avoid hardcoding remote URLs in source. Pass them through environment variables or a discovery API:
+
+```javascript webpack.config.js
+const { DefinePlugin } = require('webpack');
+
+module.exports = {
+  plugins: [
+    new DefinePlugin({
+      'process.env.DISCOVERY_ENDPOINT': JSON.stringify(process.env.DISCOVERY_ENDPOINT),
+    }),
+    // ...
+  ],
+};
+```
+
+The shell app then reads the endpoint at runtime:
+
+```javascript App.js
+const ENDPOINT = process.env.DISCOVERY_ENDPOINT;
+
+async function init() {
+  MFEs = await discover({ endpoint: ENDPOINT });
+}
+```
+
+Start the app with the endpoint injected:
+
+```bash
+export DISCOVERY_ENDPOINT=$CONSUMER_API_URL/projects/$PROJECT_ID/microFrontends
+npm start
+```
+
+See [Frontend Discovery](/examples/frontend-discovery) for the full dynamic discovery pattern.
+
+## Zephyr Cloud
+
+[Zephyr Cloud](https://zephyr-cloud.io) provides zero-configuration deployment that integrates directly into your build process.
+
+<CardGroup cols={2}>
+  <Card title="Zero-config deploys" icon="bolt">
+    Automatically deploys federated applications during the build. Save your code and get a shareable URL in seconds.
+  </Card>
+  <Card title="Multi-bundler support" icon="layers">
+    Works with Webpack, Vite, Rspack, and more without requiring separate configuration per bundler.
+  </Card>
+  <Card title="BYOC" icon="cloud">
+    Deploy using Bring Your Own Cloud to any cloud provider.
+  </Card>
+  <Card title="Version management" icon="arrow-left-right">
+    Handles micro frontend dependency management, version rollback, and roll-forward across different release cadences.
+  </Card>
+</CardGroup>
+
+## Production checklist
+
+<AccordionGroup>
+  <Accordion title="publicPath is set correctly">
+    Use `output.publicPath: 'auto'` unless you have a specific reason to hardcode a URL. Verify that `remoteEntry.js` (or `mf-manifest.json`) loads without 404 errors from the actual deployment URL.
+  </Accordion>
+  <Accordion title="Remote URLs are not hardcoded in the host build">
+    Remote URLs should come from environment variables, a manifest file, or a discovery service — not from string literals in `webpack.config.js`. This lets you promote the same host artifact across environments.
+  </Accordion>
+  <Accordion title="CORS is configured on remote servers">
+    Each remote must respond with `Access-Control-Allow-Origin` headers that include the host's origin. When using the Frontend Discovery Service on AWS, set `AccessControlAllowOrigin` and `CookieSettings` (`Secure; SameSite=None`) in the deployment parameters.
+  </Accordion>
+  <Accordion title="Shared libraries are singletons where required">
+    Declare `react` and `react-dom` as `singleton: true` to prevent multiple React instances across remotes. Mismatched versions cause hooks to fail at runtime.
+  </Accordion>
+  <Accordion title="Remotes are independently deployable">
+    Validate that updating a remote's `remoteEntry.js` on the CDN causes the host to load the new version on the next page load — with no host rebuild required.
+  </Accordion>
+  <Accordion title="Self-signed certificates are handled in HTTPS dev setups">
+    When running remotes over HTTPS locally (as required by the cookie `Secure` flag), accept the certificate for each port before testing. A `net::ERR_CERT_AUTHORITY_INVALID` error will block the remote script from loading.
+  </Accordion>
+</AccordionGroup>

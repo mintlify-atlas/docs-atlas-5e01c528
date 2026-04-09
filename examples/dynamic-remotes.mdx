@@ -1,0 +1,426 @@
+---
+title: "Dynamic Remote Loading"
+description: "Load remote modules at runtime without pre-configuring them at build time"
+---
+
+## Overview
+
+In static federation, remotes are declared in the webpack config at build time. The host knows which remotes it will use before any code runs. Dynamic remote loading removes that requirement: remotes are registered at runtime using the `@module-federation/runtime` API, and modules are fetched on demand.
+
+This unlocks patterns that are impossible with static configuration:
+
+- **Plugin systems** — load third-party extensions from URLs discovered at runtime
+- **Feature toggles** — switch between different remote implementations based on user context
+- **A/B testing** — serve different component implementations to different user segments without a rebuild
+- **Lazy remote activation** — only pay the network cost for a remote when the user actually needs it
+
+## The dynamic-system-host example
+
+This example has three applications. app1 is the host; app2 and app3 are remotes. The host renders a button for each remote. Clicking a button loads that remote's `Widget` component on demand — neither remote is fetched until the user requests it.
+
+| App  | Port | Role   | Exposes                          |
+| ---- | ---- | ------ | -------------------------------- |
+| app1 | 3001 | Host   | Nothing (consumer only)          |
+| app2 | 3002 | Remote | `./Widget` (red, uses moment.js) |
+| app3 | 3003 | Remote | `./Widget` (purple, uses moment.js) |
+
+Both remotes use `moment` as a dependency and declare it as a singleton in shared config. When the host loads both remotes, only one copy of `moment` is loaded regardless of order.
+
+## Remote configuration
+
+The remote apps are standard webpack configurations. Each exposes a `Widget` component via `remoteEntry.js`.
+
+<CodeGroup>
+
+```js app2/webpack.config.js
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const path = require('path');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    static: {
+      directory: path.join(__dirname, 'dist'),
+    },
+    port: 3002,
+  },
+  output: {
+    publicPath: 'auto',
+  },
+  module: {
+    rules: [
+      {
+        test: /\.m?js$/,
+        type: 'javascript/auto',
+        resolve: { fullySpecified: false },
+      },
+      {
+        test: /\.jsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app2',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './Widget': './src/Widget',
+      },
+      shared: [
+        {
+          react: { singleton: true },
+          'react-dom': { singleton: true },
+          moment: { singleton: true },
+        },
+      ],
+    }),
+    new HtmlWebpackPlugin({ template: './public/index.html' }),
+  ],
+};
+```
+
+```js app3/webpack.config.js
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const path = require('path');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    static: {
+      directory: path.join(__dirname, 'dist'),
+    },
+    port: 3003,
+  },
+  output: {
+    publicPath: 'auto',
+  },
+  module: {
+    rules: [
+      {
+        test: /\.m?js$/,
+        type: 'javascript/auto',
+        resolve: { fullySpecified: false },
+      },
+      {
+        test: /\.jsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app3',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './Widget': './src/Widget',
+      },
+      shared: {
+        react: { singleton: true },
+        'react-dom': { singleton: true },
+        moment: { singleton: true },
+      },
+    }),
+    new HtmlWebpackPlugin({ template: './public/index.html' }),
+  ],
+};
+```
+
+</CodeGroup>
+
+## Host configuration
+
+The host's webpack config declares no remotes. It only lists its own name and the shared dependencies it can offer:
+
+```js app1/webpack.config.js
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const path = require('path');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    static: {
+      directory: path.join(__dirname, 'dist'),
+    },
+    port: 3001,
+  },
+  output: {
+    publicPath: 'auto',
+  },
+  resolve: {
+    fallback: {
+      path: require.resolve('path-browserify'),
+      os: require.resolve('os-browserify/browser'),
+    },
+  },
+  module: {
+    rules: [
+      {
+        test: /\.m?js$/,
+        type: 'javascript/auto',
+        resolve: { fullySpecified: false },
+      },
+      {
+        test: /\.jsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app1',
+      shared: {
+        react: { singleton: true },
+        'react-dom': { singleton: true },
+        moment: { singleton: true },
+      },
+    }),
+    new HtmlWebpackPlugin({
+      template: './public/index.html',
+      favicon: './public/favicon.ico',
+    }),
+  ],
+};
+```
+
+Because `remotes` is not set in the webpack config, the host has no knowledge of app2 or app3 at build time.
+
+## The dynamic import pattern
+
+The host uses `init` and `loadRemote` from `@module-federation/runtime` to register remotes and load modules at runtime.
+
+```js app1/src/App.js
+import React, { useState, lazy, Suspense } from 'react';
+import { loadRemote, init } from '@module-federation/runtime';
+import ReactDOM from 'react-dom';
+
+init({
+  remotes: [
+    {
+      name: 'app2',
+      alias: 'app2',
+      entry: 'http://localhost:3002/remoteEntry.js',
+    },
+    {
+      name: 'app3',
+      alias: 'app3',
+      entry: 'http://localhost:3003/remoteEntry.js',
+    },
+  ],
+  plugins: [
+    {
+      name: 'custom-plugin',
+      beforeInit(args) {
+        return args;
+      },
+      init(args) {
+        console.log('init: ', args);
+        return args;
+      },
+      beforeLoadShare(args) {
+        console.log('beforeLoadShare: ', args);
+        return args;
+      },
+    },
+  ],
+  shared: {
+    react: {
+      version: '16.0.0',
+      scope: 'default',
+      lib: () => React,
+      shareConfig: {
+        singleton: true,
+        requiredVersion: '^16.0.0',
+      },
+    },
+    'react-dom': {
+      version: '16.0.0',
+      scope: 'default',
+      lib: () => ReactDOM,
+      shareConfig: {
+        singleton: true,
+        requiredVersion: '^16.0.0',
+      },
+    },
+  },
+});
+
+const System = ({ request }) => {
+  if (!request) {
+    return <h2>No system specified</h2>;
+  }
+
+  const Component = lazy(() => loadRemote(request));
+
+  return (
+    <Suspense fallback="Loading System">
+      <Component />
+    </Suspense>
+  );
+};
+
+const App = () => {
+  const [system, setSystem] = useState(null);
+
+  const setApp2 = () => setSystem('app2/Widget');
+  const setApp3 = () => setSystem('app3/Widget');
+
+  return (
+    <div>
+      <h1>Dynamic System Host</h1>
+      <h2>App 1</h2>
+      <p>
+        The Dynamic System will take advantage of Module Federation <strong>remotes</strong> and{' '}
+        <strong>exposes</strong>. It will not load any components or modules that have been
+        loaded already.
+      </p>
+      <button onClick={setApp2}>Load App 2 Widget</button>
+      <button onClick={setApp3}>Load App 3 Widget</button>
+      <div style={{ marginTop: '2em' }}>
+        <System request={system} />
+      </div>
+    </div>
+  );
+};
+
+export default App;
+```
+
+The `System` component accepts a `request` string such as `'app2/Widget'`. It passes that string directly to `loadRemote`, which fetches the remote container if it hasn't been loaded yet, then resolves the module. `React.lazy` wraps this so `Suspense` can display a fallback during the fetch.
+
+<Note>
+  `init` must be called once before any `loadRemote` calls. In this example it runs at module evaluation time (top level of `App.js`), before React renders anything. In production you may want to call `init` earlier — for example, before your app's root render — and pass remote URLs from an API response or feature flag system.
+</Note>
+
+## The remote widgets
+
+Both remotes expose a `Widget` component that uses `moment` to display a formatted date.
+
+<CodeGroup>
+
+```js app2/src/Widget.js
+import React from 'react';
+import moment from 'moment';
+
+export default function Widget() {
+  return (
+    <div
+      style={{
+        borderRadius: '4px',
+        padding: '2em',
+        backgroundColor: 'red',
+        color: 'white',
+      }}
+      data-e2e="APP_2__WIDGET"
+    >
+      <h2>App 2 Widget</h2>
+      <p>
+        App2 Moment Dep ({moment.version}): {moment().format('MMMM Do YYYY, h:mm:ss a')}
+      </p>
+    </div>
+  );
+}
+```
+
+```js app3/src/Widget.js
+import React from 'react';
+import moment from 'moment';
+
+export default function Widget() {
+  React.useEffect(() => {
+    console.log('hooks');
+  }, []);
+  return (
+    <div
+      style={{
+        borderRadius: '4px',
+        padding: '2em',
+        backgroundColor: 'purple',
+        color: 'white',
+      }}
+      data-e2e="APP_3__WIDGET"
+    >
+      <h2>App 3 Widget</h2>
+      <p>
+        Using <strong>momentjs</strong> ({moment.version}) for format the date
+      </p>
+      <p>{moment().format('MMMM Do YYYY, h:mm:ss a')}</p>
+    </div>
+  );
+}
+```
+
+</CodeGroup>
+
+Because both remotes declare `moment` as a singleton shared dependency and the host also shares it, only one copy of `moment` is loaded even when both remotes are active.
+
+## Running the example
+
+<Steps>
+  <Step title="Navigate to the example directory">
+    ```bash
+    cd dynamic-system-host
+    ```
+  </Step>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Start all three applications">
+    ```bash
+    pnpm start
+    ```
+
+    All three dev servers start in parallel. app2 and app3 must be running before clicking the load buttons in app1.
+  </Step>
+  <Step title="Open the host application">
+    Open [http://localhost:3001](http://localhost:3001). You will see two buttons: **Load App 2 Widget** and **Load App 3 Widget**.
+
+    | URL                   | Application                   |
+    | --------------------- | ----------------------------- |
+    | http://localhost:3001 | app1 — dynamic host           |
+    | http://localhost:3002 | app2 — remote with red widget |
+    | http://localhost:3003 | app3 — remote with purple widget |
+  </Step>
+  <Step title="Load a remote widget">
+    Click **Load App 2 Widget**. The host fetches `http://localhost:3002/remoteEntry.js`, resolves the `Widget` module, and renders the red widget. The remote is only fetched once — clicking the button again reuses the already-loaded module.
+  </Step>
+</Steps>
+
+## When to use dynamic vs static remotes
+
+<Tabs>
+  <Tab title="Use dynamic remotes when">
+    - Remote URLs are not known at build time (discovered from an API, config file, or feature flag service)
+    - You are building a plugin or extension system where third parties register their own remotes
+    - You want to implement A/B testing or canary releases by swapping remote URLs at runtime
+    - Remotes should only be loaded when the user needs them to avoid unnecessary network requests
+    - You need hot-swappable modules without redeploying the host
+  </Tab>
+  <Tab title="Use static remotes when">
+    - Remote URLs are stable and known at build time
+    - You want simpler configuration and easier debugging
+    - Build-time validation of the remote contract is important
+    - You are getting started with Module Federation (see the [basic host/remote example](/examples/basic-host-remote))
+  </Tab>
+</Tabs>
+
+<Warning>
+  With dynamic remotes, there is no build-time type checking or contract validation between host and remote. If a remote changes its exposed API, the host will only discover the breakage at runtime. Consider using TypeScript type federation or a schema registry to catch mismatches earlier.
+</Warning>

@@ -1,0 +1,67 @@
+---
+title: "Introduction"
+description: "A comprehensive collection of Module Federation examples demonstrating micro frontend patterns for modern web applications."
+---
+
+## What is Module Federation?
+
+Module Federation is a Webpack 5 feature that enables multiple independent builds to share code and dependencies at runtime. Instead of bundling everything into a single application, you can split your frontend into independent micro frontends that load and share components dynamically.
+
+This repository contains **over 80 working examples** covering everything from basic host/remote patterns to advanced server-side rendering, cross-framework integration, and production deployment strategies.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Run your first federated application in minutes
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/core-concepts">
+    Understand hosts, remotes, and shared dependencies
+  </Card>
+  <Card title="Basic Example" icon="code" href="/examples/basic-host-remote">
+    Start with a simple host/remote setup
+  </Card>
+  <Card title="All Examples" icon="grid" href="/examples/react">
+    Browse examples by framework and pattern
+  </Card>
+</CardGroup>
+
+## Why Module Federation?
+
+Module Federation solves the key challenges of micro frontend architecture:
+
+- **Independent deployability** — each team ships their own application on their own schedule
+- **Shared dependencies** — React, design systems, and utilities are loaded once, not duplicated
+- **Runtime composition** — applications discover and load each other without a full rebuild
+- **Framework agnostic** — React, Vue, Angular, Svelte, and more can all share modules
+
+## Who uses Module Federation?
+
+Module Federation is used in production by Netflix, Amazon, Microsoft, Shopify, PayPal, Adobe, Alibaba, and hundreds of other companies. It's the standard approach for micro frontend architecture with Webpack.
+
+## What's in this repository?
+
+<CardGroup cols={2}>
+  <Card title="Foundational Patterns" icon="layer-group" href="/examples/basic-host-remote">
+    Basic host/remote, bi-directional, and dynamic remote loading
+  </Card>
+  <Card title="Build Tool Support" icon="wrench" href="/examples/webpack">
+    Webpack 5, Rspack, and Vite configurations
+  </Card>
+  <Card title="Framework Integrations" icon="puzzle-piece" href="/examples/react">
+    React, Vue 3, Angular, Svelte, and cross-framework examples
+  </Card>
+  <Card title="Server-Side Rendering" icon="server" href="/examples/ssr-overview">
+    SSR with Next.js, React 18, and streaming
+  </Card>
+  <Card title="Advanced Patterns" icon="gear" href="/examples/shared-dependencies">
+    Shared routing, state management, runtime plugins
+  </Card>
+  <Card title="TypeScript" icon="file-code" href="/examples/typescript">
+    Full type safety with automatic type streaming
+  </Card>
+</CardGroup>
+
+## Getting Help
+
+- **Documentation**: [module-federation.io](https://module-federation.io/)
+- **Universe packages**: [github.com/module-federation/universe](https://github.com/module-federation/universe)
+- **Source code**: [github.com/module-federation/module-federation-examples](https://github.com/module-federation/module-federation-examples)

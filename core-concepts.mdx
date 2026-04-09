@@ -1,0 +1,212 @@
+---
+title: "Core Concepts"
+description: "Understand the fundamental concepts of Module Federation: hosts, remotes, exposed modules, and shared dependencies"
+---
+
+Module Federation is a Webpack 5 feature that lets separately built and deployed JavaScript applications share code at runtime. This page explains the key concepts you need to understand before building federated applications.
+
+## Host application
+
+A **host** is any application that loads modules from one or more remote applications at runtime. The host does not bundle the remote code at build time — it fetches it on demand from a running remote server.
+
+In the `basic-host-remote` example, `app1` is the host. It references `app2`'s `Button` component as if it were a local import:
+
+```jsx
+import Button from 'app2/Button';
+```
+
+The `app2` prefix is resolved at runtime using the remote registry configured in `ModuleFederationPlugin`.
+
+<Info>
+  A host application does not need to know anything about the remote's internal implementation. It only needs the remote's entry URL and the paths of the modules it wants to consume.
+</Info>
+
+## Remote application
+
+A **remote** is an application that exposes modules for other applications to consume. Remotes are independently built and deployed. Importantly, a remote can also run as a standalone application — `app2` in `basic-host-remote` does exactly this, serving its own UI at port 3002 while simultaneously exposing `Button` for `app1` to consume.
+
+<Tip>
+  Because remotes are deployed independently, you can update a remote's exposed modules without rebuilding or redeploying the host. This is the core value proposition of Module Federation.
+</Tip>
+
+## Exposed modules
+
+The `exposes` config is a map from a **public path** (what consumers import) to a **local file path** (what gets bundled into the remote container).
+
+```js
+exposes: {
+  './Button': './src/components/button.js',
+},
+```
+
+A consumer imports this as:
+
+```js
+import Button from 'app2/Button';
+//                ^^^^ remote name
+//                     ^^^^^^^ exposed path (without the leading '.')
+```
+
+You can expose any module that Webpack can process — React components, utility functions, CSS, JSON, WASM, images, and more.
+
+## Remote registry
+
+The `remotes` config in the host tells Webpack where to find each remote container. The syntax is:
+
+```
+remoteAlias: 'remoteName@http://host/path/to/remoteEntry.js'
+```
+
+- `remoteAlias` — the import prefix used in your source code (e.g. `app2` in `import X from 'app2/Button'`)
+- `remoteName` — the `name` declared in the remote's `ModuleFederationPlugin` config
+- The URL — the location of the remote's `remoteEntry.js` file
+
+```js app1/modern.config.js
+remotes: {
+  app2: 'app2@http://localhost:3002/static/js/remoteEntry.js',
+},
+```
+
+<Note>
+  The remote alias and remote name are typically the same string, but they don't have to be. The alias controls your import paths; the name identifies the container on the page.
+</Note>
+
+## Shared dependencies
+
+The `shared` config prevents duplicate copies of libraries being loaded when both host and remote depend on them. Without sharing, each federated application would bundle its own React, leading to multiple React instances on the page — which breaks hooks.
+
+```js
+shared: {
+  react: { singleton: true },
+  'react-dom': { singleton: true },
+},
+```
+
+### Key shared options
+
+| Option            | Type    | Description                                                                                             |
+| ----------------- | ------- | ------------------------------------------------------------------------------------------------------- |
+| `singleton`       | boolean | Enforce only one instance of this package across all federated apps. Required for React.                |
+| `requiredVersion`  | string  | Semver range this app requires. Webpack warns if a loaded version falls outside this range.             |
+| `eager`           | boolean | Include the shared module in the initial bundle instead of a separate async chunk. Use sparingly.       |
+| `strictVersion`   | boolean | Throw a runtime error (instead of a warning) when the version requirement is not satisfied.             |
+
+<Warning>
+  Setting `eager: true` on a shared module in the host can cause it to be loaded synchronously, which may defeat the async boundary and lead to `Shared module is not available for eager consumption` errors. Only use `eager` when you understand the implications.
+</Warning>
+
+## remoteEntry.js
+
+`remoteEntry.js` is the **container manifest** that Webpack generates for every remote. It is a small JavaScript file that:
+
+1. Declares what modules the remote exposes
+2. Lists the remote's shared dependencies and their versions
+3. Provides `get` and `init` functions that the host runtime uses to negotiate shared scope and load requested modules
+
+In the `basic-host-remote` example, app2 places its entry file at `static/js/remoteEntry.js`:
+
+```js app2/modern.config.js
+filename: 'static/js/remoteEntry.js',
+```
+
+The host then fetches this file via a `<script>` tag injected at runtime, using the URL declared in `remotes`.
+
+<Info>
+  `remoteEntry.js` is the only file the host needs to know about. Everything else — chunks, assets, lazy-loaded modules — is resolved by the container at runtime.
+</Info>
+
+## Async boundary
+
+Module Federation loads remote modules asynchronously over the network. Webpack cannot statically resolve a federated import, so the module graph must be bootstrapped asynchronously before any federated code runs.
+
+If your entry point synchronously imports a federated module, Webpack will throw an error at runtime because the remote container has not been initialized yet.
+
+The solution is an **async boundary** — ensuring the application entry waits for the container to be initialized before executing module code. There are two common approaches:
+
+<AccordionGroup>
+  <Accordion title="Dynamic import bootstrap (manual)">
+    Instead of importing app code directly in your entry file, re-export it via a dynamic import:
+
+    ```js index.js (entry)
+    import('./bootstrap');
+    ```
+
+    ```js bootstrap.js
+    import App from './App';
+    import React from 'react';
+    import ReactDOM from 'react-dom';
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+    ```
+
+    The dynamic `import()` gives Webpack time to initialize shared scope and fetch any remote containers before `bootstrap.js` executes.
+  </Accordion>
+
+  <Accordion title="enableAsyncEntry (Modern.js)">
+    When using Modern.js (as in the `basic-host-remote` example), set `enableAsyncEntry: true` in your config. Modern.js automatically generates the async boundary:
+
+    ```js modern.config.js
+    source: {
+      enableAsyncEntry: true,
+    },
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Complete annotated example
+
+The following is a complete `ModuleFederationPlugin` configuration drawn from the `basic-host-remote` example, with annotations explaining each field.
+
+<CodeGroup>
+
+```js app1/modern.config.js (host)
+new ModuleFederationPlugin({
+  // Unique name for this container. Used to identify it on the page.
+  name: 'app1',
+
+  // Map of remote aliases to their container URLs.
+  // Syntax: 'remoteName@http://host/remoteEntry.js'
+  remotes: {
+    app2: 'app2@http://localhost:3002/static/js/remoteEntry.js',
+  },
+
+  // Shared dependencies. Both host and remote must declare the same packages
+  // for Webpack to negotiate a single shared instance.
+  shared: {
+    react: { singleton: true },      // Only one React instance allowed
+    'react-dom': { singleton: true },
+  },
+})
+```
+
+```js app2/modern.config.js (remote)
+new ModuleFederationPlugin({
+  // Unique name for this container.
+  name: 'app2',
+
+  // How the container is exposed on the page (as a window global here).
+  library: { type: 'window', name: 'app2' },
+
+  // The output filename for the container manifest.
+  // Consumers point their 'remotes' config at this URL.
+  filename: 'static/js/remoteEntry.js',
+
+  // Map of public paths to local source files.
+  // './Button' becomes importable as 'app2/Button' in the host.
+  exposes: {
+    './Button': './src/components/button.js',
+  },
+
+  // Shared dependencies must match across host and remote.
+  shared: {
+    react: { singleton: true },
+    'react-dom': { singleton: true },
+  },
+})
+```
+
+</CodeGroup>
+
+<Tip>
+  Both host and remote should declare the same `shared` packages with the same options. If one side omits a package from `shared`, Webpack cannot negotiate a single instance and may load two copies.
+</Tip>

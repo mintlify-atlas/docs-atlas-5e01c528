@@ -1,80 +1,182 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick Start"
+description: "Run your first Module Federation example in minutes"
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+Before you begin, make sure you have the following installed:
 
-### Step 1: Set up your local environment
+- **Node.js 16+** — check with `node --version`
+- **pnpm** — install with `npm install -g pnpm`
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Note>
+  The examples repository uses pnpm workspaces. npm and yarn are not supported at the repo root.
+</Note>
 
-### Step 2: Deploy your changes
+## Run the basic-host-remote example
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/module-federation/module-federation-examples.git
+    cd module-federation-examples
+    ```
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Install dependencies">
+    Run `pnpm install` from the repository root. pnpm workspaces resolves dependencies for all examples at once.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    pnpm install
+    ```
+  </Step>
 
-### Step 3: Go live
+  <Step title="Start the example">
+    Navigate into the `basic-host-remote` directory and run `pnpm start`. This builds and serves both applications concurrently.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    ```bash
+    cd basic-host-remote
+    pnpm start
+    ```
+
+    You should see both dev servers start up:
+
+    | App  | Role            | URL                     |
+    | ---- | --------------- | ----------------------- |
+    | app1 | Host            | http://localhost:3001   |
+    | app2 | Remote          | http://localhost:3002   |
+  </Step>
+
+  <Step title="Open the host application">
+    Open [http://localhost:3001](http://localhost:3001) in your browser. You will see the host application (app1) rendering a `Button` component that was loaded from app2 at runtime.
+
+    You can also open [http://localhost:3002](http://localhost:3002) to confirm app2 runs independently as a standalone application.
+  </Step>
+</Steps>
+
+## What you're seeing
+
+The host application (`app1`, port 3001) imports `Button` directly from the remote application (`app2`, port 3002) at runtime — no build-time bundling of app2's code into app1.
+
+In `app1/src/routes/page.jsx`, the import looks like a standard ES module import:
+
+```jsx app1/src/routes/page.jsx
+import Button from 'app2/Button';
+
+const Index = () => (
+  <div className="container-box">
+    <h1>Basic Host-Remote</h1>
+    <p className="description">
+      FEDERATED: <Button />
+    </p>
+  </div>
+);
+```
+
+The `Button` component itself lives in `app2/src/components/button.js`:
+
+```js app2/src/components/button.js
+import React from 'react';
+
+const Button = () => (
+  <button style={{ padding: '10px', background: 'red' }}>App 2 Button!!!!</button>
+);
+
+export default Button;
+```
+
+At runtime, the browser fetches `http://localhost:3002/static/js/remoteEntry.js` — app2's container manifest — and resolves the `Button` module from there.
+
+## The configuration
+
+Here is what makes federation work in each application.
+
+<CodeGroup>
+
+```js app1/modern.config.js (host)
+import appTools, { defineConfig } from '@modern-js/app-tools';
+import { ModuleFederationPlugin } from '@module-federation/enhanced/webpack';
+
+export default defineConfig({
+  server: {
+    port: 3001,
+  },
+  source: {
+    // Generates an async boundary so federated modules can be loaded dynamically
+    enableAsyncEntry: true,
+  },
+  tools: {
+    webpack: (config, { appendPlugins }) => {
+      delete config.optimization.splitChunks;
+      config.output.publicPath = 'auto';
+
+      appendPlugins([
+        new ModuleFederationPlugin({
+          name: 'app1',
+          remotes: {
+            // Maps the 'app2' import prefix to the remote container URL
+            app2: 'app2@http://localhost:3002/static/js/remoteEntry.js',
+          },
+          shared: {
+            react: { singleton: true },
+            'react-dom': { singleton: true },
+          },
+        }),
+      ]);
+    },
+  },
+  plugins: [appTools()],
+});
+```
+
+```js app2/modern.config.js (remote)
+import appTools, { defineConfig } from '@modern-js/app-tools';
+import { ModuleFederationPlugin } from '@module-federation/enhanced';
+
+export default defineConfig({
+  server: {
+    port: 3002,
+  },
+  source: {
+    enableAsyncEntry: true,
+  },
+  tools: {
+    webpack: (config, { appendPlugins }) => {
+      delete config.optimization.splitChunks;
+      config.output.publicPath = 'auto';
+
+      appendPlugins([
+        new ModuleFederationPlugin({
+          name: 'app2',
+          library: { type: 'window', name: 'app2' },
+          filename: 'static/js/remoteEntry.js',
+          exposes: {
+            // Exposes Button at the path './Button'
+            './Button': './src/components/button.js',
+          },
+          shared: {
+            react: { singleton: true },
+            'react-dom': { singleton: true },
+          },
+        }),
+      ]);
+    },
+  },
+  plugins: [appTools()],
+});
+```
+
+</CodeGroup>
+
+<Tip>
+  The `shared` config with `singleton: true` ensures both apps use the same React instance, preventing hook errors that occur when multiple React copies are loaded.
+</Tip>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
+Now that you have seen a working federation setup, learn the concepts behind it.
 
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
+<Card title="Core concepts" icon="book-open" href="/core-concepts">
+  Understand hosts, remotes, exposed modules, shared dependencies, and how remoteEntry.js works.
 </Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

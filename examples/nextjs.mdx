@@ -1,0 +1,227 @@
+---
+title: "Next.js"
+description: "Module Federation with Next.js — client-side rendering and server-side rendering patterns"
+---
+
+<Warning>
+  Support for `@module-federation/nextjs-mf` is ending. See the [tracking issue](https://github.com/module-federation/core/issues/3153) for details. These examples are kept for reference, but new projects should use the Modern.js or Rspack-based approaches instead.
+</Warning>
+
+The repository contains two Next.js federation patterns:
+
+- **`nextjs-csr`** — client-side-only federation using `@module-federation/nextjs-mf`
+- **`nextjs-dynamic-ssr`** — extends the CSR pattern to also serve federated modules from the server bundle for SSR page loads
+
+Both patterns use three Next.js applications — `checkout` (port 3000), `home` (port 3001), and `shop` (port 3002) — that federate pages and components between each other using omnidirectional routing.
+
+## The `@module-federation/nextjs-mf` plugin
+
+Next.js does not expose a standard webpack async boundary between the application entry point and module initialization. This makes normal Module Federation sharing behave incorrectly: webpack cannot pause execution to orchestrate the share scope before modules are needed.
+
+`@module-federation/nextjs-mf` works around this by:
+
+- Pre-sharing Next.js internal modules and attaching them to the share scope at runtime
+- Reconfiguring any additional shared modules you declare so they work within Next.js's module loading constraints
+- Generating a `remoteEntry.js` that is compatible with Next.js's static chunk serving infrastructure
+
+<Note>
+  Because there is no true async boundary, you **cannot** share arbitrary modules the same way you would in a standard webpack app. The `eager: true` workaround used in plain webpack does not apply here. All sharing must go through the plugin.
+</Note>
+
+## `nextjs-csr` — client-side federation
+
+In `nextjs-csr`, the `NextFederationPlugin` is applied only when `isServer` is `false`. The remote entry is served as a standard Next.js static chunk.
+
+<CodeGroup>
+
+```javascript nextjs-csr/home/next.config.js
+const NextFederationPlugin = require('@module-federation/nextjs-mf');
+
+module.exports = {
+  webpack(config, options) {
+    if (!options.isServer) {
+      config.plugins.push(
+        new NextFederationPlugin({
+          name: 'home',
+          filename: 'static/chunks/remoteEntry.js',
+          remotes: {
+            shop: 'shop@http://localhost:3002/_next/static/chunks/remoteEntry.js',
+            checkout: 'checkout@http://localhost:3000/_next/static/chunks/remoteEntry.js',
+          },
+          exposes: {
+            './nav': './components/nav.js',
+            './home': './pages/index.js',
+            './pages-map': './pages-map.js',
+          },
+          shared: {},
+        }),
+      );
+    }
+    return config;
+  },
+};
+```
+
+```javascript nextjs-csr/checkout/next.config.js
+const NextFederationPlugin = require('@module-federation/nextjs-mf');
+
+module.exports = {
+  webpack(config, options) {
+    if (!options.isServer) {
+      config.plugins.push(
+        new NextFederationPlugin({
+          name: 'checkout',
+          filename: 'static/chunks/remoteEntry.js',
+          remotes: {
+            home: 'home@http://localhost:3001/_next/static/chunks/remoteEntry.js',
+            shop: 'shop@http://localhost:3002/_next/static/chunks/remoteEntry.js',
+          },
+          exposes: {
+            './title': './components/exposedTitle.js',
+            './checkout': './pages/checkout',
+            './pages-map': './pages-map.js',
+          },
+          shared: {},
+        }),
+      );
+    }
+    return config;
+  },
+};
+```
+
+</CodeGroup>
+
+Each application exposes its pages and a `pages-map.js` file. The `pages-map` pattern is how omnidirectional routing works: each app publishes a map of its routes so that other apps can navigate to those pages as if they were local.
+
+### What gets federated
+
+Each application exposes:
+
+| App | Exposed modules |
+| --- | --- |
+| `home` (3001) | `./nav`, `./home`, `./pages-map` |
+| `shop` (3002) | components, pages, `./pages-map` |
+| `checkout` (3000) | `./title`, `./checkout`, `./pages-map` |
+
+### Sharing React
+
+React is shared through the plugin — you do not add it to the `shared` object manually. The plugin's pre-shared internals include React hooks, so multiple copies of React are never loaded.
+
+## `nextjs-dynamic-ssr` — server-side rendering
+
+The `nextjs-dynamic-ssr` example extends the CSR pattern by pointing each application's remotes at a different path depending on whether the build is for the server or the browser.
+
+```javascript nextjs-dynamic-ssr/home/next.config.js
+const NextFederationPlugin = require('@module-federation/nextjs-mf');
+
+// Switch between SSR and client chunk paths based on build target
+const remotes = isServer => {
+  const location = isServer ? 'ssr' : 'chunks';
+  return {
+    home: `home@http://localhost:3001/_next/static/${location}/remoteEntry.js`,
+    shop: `shop@http://localhost:3002/_next/static/${location}/remoteEntry.js`,
+  };
+};
+
+module.exports = {
+  webpack(config, options) {
+    config.plugins.push(
+      new NextFederationPlugin({
+        name: 'home',
+        filename: 'static/chunks/remoteEntry.js',
+        remotes: remotes(options.isServer),
+        exposes: {
+          './nav': './components/nav.js',
+          './home': './pages/index.js',
+          './pages-map': './pages-map.js',
+        },
+        shared: {},
+        extraOptions: {
+          exposePages: true,
+        },
+      }),
+    );
+    return config;
+  },
+};
+```
+
+Key differences from the CSR pattern:
+
+- The `isServer` guard is removed — the plugin runs for **both** server and client builds
+- `remotes` is a function that returns different URLs based on `options.isServer`
+  - Server build: `_next/static/ssr/remoteEntry.js`
+  - Client build: `_next/static/chunks/remoteEntry.js`
+- `extraOptions.exposePages: true` automatically exposes all pages in the `pages/` directory
+
+<Info>
+  The `ssr` path serves CommonJS modules. These are the modules streamed between servers at request time. The `chunks` path serves browser-compatible bundles for client-side hydration.
+</Info>
+
+### How SSR streaming works
+
+This implementation uses proprietary "Software Streams" to deliver CommonJS modules at runtime from remote servers to consuming servers. The mechanism allows `import()`, `require`, and `import from` to all work server-side with federated modules.
+
+## Security
+
+<Warning>
+  The `_next/static/ssr*` path exposes your **server-side code** over HTTP. Unlike browser bundles, these modules are not tree-shaken with `process.browser`. Server secrets you import anywhere in the module graph could be exposed.
+</Warning>
+
+Restrict the `_next/static/ssr*` path to internal traffic only:
+
+- Configure your CDN or load balancer to block external access to `/_next/static/ssr`
+- Allow access only from internal network addresses or a VPN
+- Only federate modules between servers you trust
+
+Until stream encryption is implemented, treat all server-to-server federation as internal infrastructure that must not be reachable from the public internet.
+
+## Omnidirectional routing
+
+Both Next.js examples use an omnidirectional routing pattern. Rather than one application owning navigation, any application can route to any page from any other application:
+
+- Each app publishes a `pages-map.js` that lists its routes
+- The consuming app imports the remote `pages-map` to know which URLs belong to which remote
+- Webpack federation loading functions are extended so `import('home/title')` and dynamic `import()` both use the same remote resolution mechanism
+
+This makes all three applications feel like a single SPA to the user, while each remains an independently deployable Next.js application.
+
+## Running the examples
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Start all applications">
+    Run from inside the example directory:
+
+    <Tabs>
+      <Tab title="nextjs-csr">
+        ```bash
+        cd nextjs-csr
+        pnpm run start
+        ```
+      </Tab>
+      <Tab title="nextjs-dynamic-ssr">
+        ```bash
+        cd nextjs-dynamic-ssr
+        pnpm run start
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Open the applications">
+    | App | URL |
+    | --- | --- |
+    | checkout | http://localhost:3000 |
+    | home | http://localhost:3001 |
+    | shop | http://localhost:3002 |
+
+    Start with `http://localhost:3001` (home) and navigate between applications to observe cross-app routing.
+  </Step>
+</Steps>

@@ -1,0 +1,240 @@
+---
+title: "Shared dependencies"
+description: "Control how libraries like React, Vue, and design systems are shared across federated applications"
+---
+
+Shared dependencies let federated applications reuse a single copy of a library instead of each remote bundling its own. Without sharing, loading five remotes that each bundle React results in five separate React instances — breaking hooks, context, and event handlers.
+
+The `shared` key in `ModuleFederationPlugin` declares which packages should be negotiated at runtime rather than bundled independently.
+
+## The `shared` config object
+
+<AccordionGroup>
+  <Accordion title="singleton: true">
+    Only one instance of this package is allowed across the entire federated application. If the host and remote declare different versions, the highest compatible version wins and all consumers use it. Use `singleton: true` for any package that stores global state — React, React DOM, Redux, Vue.
+
+    ```js webpack.config.js
+    shared: {
+      react: { singleton: true },
+      'react-dom': { singleton: true },
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="requiredVersion">
+    A semver range that this application requires. If no loaded version satisfies the range, the runtime falls back to the local copy (or throws if `strictVersion` is also set). Specify this to catch silent version mismatches early.
+
+    ```js webpack.config.js
+    shared: {
+      react: {
+        singleton: true,
+        requiredVersion: '^18.0.0',
+      },
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="eager: true">
+    Includes the package in the initial synchronous bundle instead of loading it lazily when first required. Use `eager: true` only in the entry point (host) for packages that must be available before any async boundary. Setting it in every remote defeats the purpose of sharing.
+
+    ```js webpack.config.js
+    shared: {
+      react: {
+        eager: true,
+        singleton: true,
+        requiredVersion: deps.react,
+      },
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="strictVersion: true">
+    Throws a runtime error when no loaded instance satisfies `requiredVersion`. Without this flag, the runtime silently uses whatever version is available. Combine with `requiredVersion` when a version mismatch would cause silent data corruption rather than an obvious crash.
+
+    ```js webpack.config.js
+    shared: {
+      'some-critical-library': {
+        singleton: true,
+        requiredVersion: '^2.0.0',
+        strictVersion: true,
+      },
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Self-healing: fetching missing dependencies from a remote
+
+The `self-healing` example demonstrates what happens when the host does not provide a dependency that a remote expects to share.
+
+`app1` (host, port 3001) declares `react` and `react-dom` as shared but omits `styled-components`. `app2` (remote, port 3002) expects all three to be shared.
+
+<CodeGroup>
+
+```js self-healing/app1/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'app1',
+  filename: 'remoteEntry.js',
+  remotes: {
+    app2: 'app2@http://localhost:3002/remoteEntry.js',
+  },
+  shareStrategy: 'loaded-first',
+  // app2 is expecting "styled-components" shared dependency
+  shared: [{ react: { singleton: true }, 'react-dom': { singleton: true } }],
+})
+```
+
+```js self-healing/app2/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'app2',
+  filename: 'remoteEntry.js',
+  remotes: {
+    app1: 'app1@http://localhost:3001/remoteEntry.js',
+  },
+  exposes: {
+    './Button': './src/Button',
+  },
+  shareStrategy: 'loaded-first',
+  // app2 is expecting "styled-components" as a shared dependency
+  shared: [
+    'styled-components',
+    { react: { singleton: true }, 'react-dom': { singleton: true } },
+  ],
+})
+```
+
+</CodeGroup>
+
+When `app1` loads `app2/Button`, the federation runtime detects that `styled-components` is missing from the host's share scope. Rather than throwing, it falls back to fetching `styled-components` directly from `app2`'s own bundle.
+
+Open the **Network** tab when running the example: you will see two requests to `app2` — one for the `Button` component chunk, and one for `styled-components`. The button renders correctly in both apps despite the host not having declared `styled-components`.
+
+<Tip>
+  The `shareStrategy: 'loaded-first'` option means whichever version of a package loads first wins, rather than the highest-version-wins default. This is useful when you want the host's version to always take precedence.
+</Tip>
+
+### Running the example
+
+```bash
+cd self-healing
+pnpm start
+```
+
+| App  | Role   | URL                   |
+| ---- | ------ | --------------------- |
+| app1 | Host   | http://localhost:3001 |
+| app2 | Remote | http://localhost:3002 |
+
+## Multiple share scopes
+
+The `multiple-share-scope` example runs **React 17 and React 18 simultaneously** in the same host by placing each version in a separate share scope.
+
+The host defines two scopes: `default` for React 17 (aliased as `react17` / `react-dom17`) and `react18` for React 18. Each remote is associated with the appropriate scope.
+
+```ts multiple-share-scope/host/module-federation.config.ts
+import { createModuleFederationConfig } from '@module-federation/modern-js';
+
+export default createModuleFederationConfig({
+  name: 'host',
+  remotes: {
+    provider17: {
+      external: 'provider17@http://localhost:8081/mf-manifest.json',
+    },
+    provider18: {
+      external: 'provider18@http://localhost:8082/mf-manifest.json',
+      shareScope: ['react18', 'default'],
+    },
+  },
+  shared: {
+    react: {
+      singleton: true,
+      shareScope: 'react18',
+    },
+    'react-dom': {
+      singleton: true,
+      shareScope: 'react18',
+    },
+    react17: {
+      shareKey: 'react',
+      request: 'react17',
+      shareScope: 'default',
+      singleton: true,
+    },
+    'react-dom17': {
+      shareKey: 'react-dom',
+      request: 'react-dom17',
+      shareScope: 'default',
+      singleton: true,
+    },
+  },
+});
+```
+
+| App             | Port | React version |
+| --------------- | ---- | ------------- |
+| host            | 8080 | both          |
+| provider-react-17 | 8081 | 17          |
+| provider-react-18 | 8082 | 18          |
+
+```bash
+cd multiple-share-scope
+pnpm start
+```
+
+<Note>
+  Multiple share scopes require `@module-federation/modern-js` or an equivalent plugin that supports the `shareScope` field on individual remotes.
+</Note>
+
+## Loading shared libraries from a CDN
+
+The `federated-library-from-cdn` example shows how to point a remote at a pre-deployed `remoteEntry.js` on a CDN instead of a local dev server. The host sets the remote URL to the CDN endpoint:
+
+```js federated-library-from-cdn/app1/webpack.config.js
+const remoteUrl = 'https://federated-library.pages.dev/remoteEntry.js';
+
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'app1',
+  remotes: {
+    remoteLibrary: `remoteLibrary@${remoteUrl}`,
+  },
+})
+```
+
+The `remoteLibrary` application exposes a `Button` component. The consumer treats it identically to any local remote — `import('remoteLibrary/Button')` — and the browser fetches the chunk from the CDN at runtime.
+
+```js federated-library-from-cdn/remoteLibrary/webpack.common.js
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'remoteLibrary',
+  filename: 'remoteEntry.js',
+  exposes: {
+    './Button': './src/button.jsx',
+  },
+})
+```
+
+To use your own CDN deployment, build the remote library (`npm run build`), upload the `dist/` folder to your CDN, then set `remoteUrl` to the URL of the deployed `remoteEntry.js`.
+
+## Best practices
+
+<CardGroup cols={2}>
+  <Card title="Always share React and React DOM as singletons" icon="check">
+    Multiple React instances break hooks, context, and `act()` in tests. Set `singleton: true` on both `react` and `react-dom` in every application in the federation.
+  </Card>
+  <Card title="Share design system components carefully" icon="check">
+    A design system that stores no global state can safely be shared with version negotiation. One that patches globals or uses module-level singletons needs `singleton: true`.
+  </Card>
+  <Card title="Avoid sharing utilities with no side effects" icon="x">
+    Small utilities like `lodash` or `date-fns` are usually better bundled per remote. The network request to fetch a shared chunk often costs more than duplicating a small utility.
+  </Card>
+  <Card title="Do not set eager on remotes" icon="x">
+    `eager: true` includes the package in the synchronous chunk. On remotes this breaks async loading and causes the `Uncaught Error: Shared module is not available for eager consumption` error. Only set `eager: true` in the entry point of the host.
+  </Card>
+</CardGroup>

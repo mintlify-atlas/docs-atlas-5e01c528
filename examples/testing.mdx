@@ -1,0 +1,291 @@
+---
+title: 'Testing'
+description: 'End-to-end testing for federated applications using Playwright'
+keywords: ['playwright', 'e2e', 'testing', 'module federation', 'CI', 'BaseMethods']
+---
+
+Testing federated applications introduces challenges that do not exist in single-application setups. Multiple dev servers must be running simultaneously before tests can start, federated modules load asynchronously over the network, and a test failure in one remote can cascade to the host. The `playwright-e2e` package in this repository provides shared helpers, fixtures, and types that every example can use to avoid duplicating this boilerplate.
+
+## Testing challenges with Module Federation
+
+<CardGroup cols={2}>
+  <Card title="Multiple running servers" icon="server">
+    Each example typically starts two or more dev servers (host, remote1, remote2, …). All must be healthy before any test can navigate to `localhost`.
+  </Card>
+  <Card title="Async module loading" icon="clock">
+    Federated modules are fetched and initialized after the page loads. Tests must wait for components to appear rather than asserting immediately after navigation.
+  </Card>
+  <Card title="Cross-origin requests" icon="globe">
+    Remotes are served from different ports. CORS errors, certificate warnings, and network failures all fail silently in the browser unless explicitly monitored.
+  </Card>
+  <Card title="Shared dependency versions" icon="package">
+    Singleton libraries (React, React DOM) must resolve to a single instance. Version mismatches surface as runtime errors, not build errors, making them hard to catch without E2E tests.
+  </Card>
+</CardGroup>
+
+## The playwright-e2e package
+
+The shared testing package lives at `playwright-e2e/` in the repo root. Its purpose is to provide a consistent set of helpers, selectors, and fixtures so that each example's test file stays focused on what is unique to that example.
+
+### Directory structure
+
+```
+playwright-e2e/
+├── common/
+│   ├── base.ts          # BaseMethods — the primary test helper class
+│   ├── basePage.ts      # BasePage — lighter fixture-based alternative
+│   ├── playwright.ts    # Re-exports expect and test from @playwright/test
+│   ├── selectors.ts     # Shared CSS/attribute selectors
+│   └── testFixtures.ts  # Playwright fixture extending test with BasePage
+├── fixtures/
+│   ├── constants.ts     # App-specific text, URLs, selector parts
+│   ├── commonTestData.ts
+│   └── nextjsSsr.json
+├── helpers/
+│   ├── base-helper.ts   # Date generation utilities (moment.js)
+│   └── file-actions-helper.ts
+└── types/
+    ├── cssAttr.ts
+    ├── dates.ts
+    ├── requestsTypes.ts
+    └── stubTypes.ts
+```
+
+### BaseMethods helper class
+
+`BaseMethods` (`playwright-e2e/common/base.ts`) is the primary utility class. Instantiate it with a Playwright `Page` object and call its methods in place of raw Playwright assertions.
+
+Key methods:
+
+| Method | Description |
+|---|---|
+| `openLocalhost({ number, path })` | Navigates to `http://localhost:<number>` and retries for up to 60 seconds while the server is starting. |
+| `checkElementVisibility({ selector, isVisible, text })` | Asserts that an element is visible (or not). |
+| `checkElementWithTextPresence({ selector, text, isVisible })` | Asserts that an element containing specific text exists or does not exist. |
+| `clickElementWithText({ selector, text })` | Clicks the first element matching selector that contains the given text. |
+| `checkElementContainText({ selector, text, isContain })` | Asserts that an element's text content includes (or excludes) a value. |
+| `compareInfoBetweenHosts({ selector, extraHost })` | Opens a second browser page at a different port and asserts that the same element has identical text on both hosts. |
+| `checkCounterFunctionality({ button, counterElement, counterText })` | Clicks a button and verifies the counter increments. |
+
+```typescript
+// BaseMethods.openLocalhost — retries for 60 s while the dev server starts
+async openLocalhost({ number, path }: { number: number; path?: string }): Promise<void> {
+  const normalizedPath = path ? path.replace(/^\//, '') : '';
+  const url = `http://localhost:${number}${normalizedPath ? `/${normalizedPath}` : ''}`;
+  const deadline = Date.now() + 60_000;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      await this.page.goto(url, { waitUntil: 'networkidle' });
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes('ERR_CONNECTION_REFUSED') && !message.includes('ECONNREFUSED')) {
+        throw error;
+      }
+      lastError = error;
+      await this.page.waitForTimeout(1000);
+    }
+  }
+
+  throw lastError ?? new Error(`Timed out waiting for ${url}`);
+}
+```
+
+### BasePage fixture
+
+`BasePage` (`playwright-e2e/common/basePage.ts`) is a lighter alternative exposed as a Playwright fixture. Use it when your test file needs a fixture-based setup:
+
+```typescript testFixtures.ts
+import { BasePage } from './basePage';
+import { test as base } from './playwright';
+
+export const test = base.extend<{ basePage: BasePage }>({
+  basePage: async ({ page }, use) => {
+    await use(new BasePage(page));
+  },
+});
+```
+
+`BasePage.openLocalhost` navigates to a port and optionally waits for a specific selector to become visible:
+
+```typescript basePage.ts
+async openLocalhost({ port, path, waitUntilSelector }: OpenLocalhostOptions): Promise<void> {
+  const url = `http://localhost:${port}${path ? (path.startsWith('/') ? path : `/${path}`) : ''}`;
+  await this.page.goto(url, { waitUntil: 'networkidle' });
+
+  if (waitUntilSelector) {
+    await this.page.waitForSelector(waitUntilSelector, { state: 'visible' });
+  }
+}
+```
+
+## Running tests
+
+All commands run from the repo root.
+
+<Tabs>
+  <Tab title="Interactive (UI mode)">
+    Opens the Playwright UI where you can select tests, step through them, and inspect traces:
+
+    ```bash
+    pnpm exec playwright test --ui
+    ```
+  </Tab>
+  <Tab title="Headless (CI-style)">
+    Runs all tests in headless mode with a list reporter:
+
+    ```bash
+    pnpm exec playwright test --reporter=list
+    ```
+  </Tab>
+  <Tab title="Single example">
+    Most examples include a `playwright.config.ts` in their directory. Run just that example's tests:
+
+    ```bash
+    pnpm exec playwright test --config <sample>/playwright.config.ts
+    ```
+
+    Or via the example's npm script:
+
+    ```bash
+    pnpm --filter <sample-name> e2e:ci
+    ```
+  </Tab>
+</Tabs>
+
+## Writing tests with shared helpers
+
+Import `BaseMethods` from the shared package and use it in any example's test file:
+
+```typescript e2e/checkApplications.spec.ts
+import { test } from '@playwright/test';
+import { BaseMethods } from '../../playwright-e2e/common/base';
+
+test('loads remote component from host', async ({ page }) => {
+  const base = new BaseMethods(page);
+
+  // Waits up to 60 s for the dev server to be ready
+  await base.openLocalhost({ number: 3001 });
+
+  // Assert that federated heading rendered
+  await base.checkElementWithTextPresence({
+    selector: 'h1',
+    text: 'Basic Host-Remote',
+  });
+
+  // Assert remote button rendered
+  await base.checkElementWithTextPresence({
+    selector: 'button',
+    text: 'App 2 Button!!!!',
+  });
+});
+```
+
+## Example test: basic-host-remote
+
+The `basic-host-remote` example contains a concise spec that validates the fundamental host/remote setup:
+
+```typescript basic-host-remote/e2e/checkApplications.spec.ts
+import { test, expect } from '@playwright/test';
+
+const apps = [
+  { port: 3001, name: 'App 1' },
+  { port: 3002, name: 'App 2' },
+];
+
+apps.forEach(({ port, name }) => {
+  test.describe(`Check ${name}`, () => {
+    test(`Check ${name} built and running`, async ({ page }) => {
+      await page.goto(`http://localhost:${port}`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText('Basic Host-Remote');
+      await expect(page.getByRole('heading', { level: 2, name })).toBeVisible();
+    });
+
+    test(`Check buttons in ${name} exist`, async ({ page }) => {
+      await page.goto(`http://localhost:${port}`);
+      await expect(page.getByRole('button')).toHaveText('App 2 Button!!!!');
+    });
+  });
+});
+```
+
+The test runs against both the host (port 3001) and the remote (port 3002), verifying that the remote button component is visible from both origins. The Playwright config wires up both dev servers automatically:
+
+```typescript basic-host-remote/playwright.config.ts
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './e2e',
+  timeout: 60000,
+  expect: { timeout: 15000 },
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 1 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: [['html', { outputFolder: 'playwright-report', open: 'never' }], ['list']],
+  use: {
+    baseURL: 'http://localhost:3001',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
+    video: 'retain-on-failure',
+    viewport: { width: 1920, height: 1080 },
+  },
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+  ],
+  webServer: [
+    {
+      command: 'cd app1 && pnpm serve',
+      port: 3001,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120000,
+    },
+    {
+      command: 'cd app2 && pnpm serve',
+      port: 3002,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120000,
+    },
+  ],
+});
+```
+
+## What tests validate
+
+<AccordionGroup>
+  <Accordion title="Module loading">
+    Tests navigate to the host and assert that federated components from remotes appear in the DOM. A missing `remoteEntry.js`, wrong `publicPath`, or CORS error will cause the component to never render, failing the assertion.
+  </Accordion>
+  <Accordion title="Component rendering">
+    Shared helpers check for specific headings, button text, and widget content. These assertions confirm that the correct version of a component loaded and rendered without React errors.
+  </Accordion>
+  <Accordion title="Cross-origin behavior">
+    Some tests open a second browser context at the remote's port and compare the element text with what the host renders. This confirms that the same component produces consistent output regardless of where it is hosted.
+  </Accordion>
+  <Accordion title="Dynamic imports">
+    For examples that load remotes on demand (e.g., `dynamic-remotes`), tests click buttons, wait for `networkidle`, and then assert that the dynamically loaded widget is visible. Console error listeners catch `ChunkLoadError` and `Failed to fetch` failures.
+  </Accordion>
+  <Accordion title="Shared dependency deduplication">
+    Tests monitor network requests and assert that shared libraries (React, moment.js) are not fetched more than once even when multiple remotes declare them as dependencies.
+  </Accordion>
+</AccordionGroup>
+
+## CI integration
+
+The repository runs all example tests on pull requests via GitHub Actions. The workflow uses Playwright's `--reporter=list` flag and sets `CI=true`, which:
+
+- Disables `reuseExistingServer` (always starts fresh servers)
+- Limits workers to 1 to avoid port conflicts
+- Enables 1 retry on failure
+
+To run an example's tests in CI mode locally:
+
+```bash
+CI=true pnpm --filter basic-host-remote e2e:ci
+```
+
+<Tip>
+  Add `playwright.config.ts` and an `e2e/` directory to any new example following the `basic-host-remote` pattern. The shared `playwright-e2e` package is already available as a workspace dependency.
+</Tip>

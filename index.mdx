@@ -1,97 +1,52 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Module Federation Examples"
+description: "Over 80 working examples of Webpack 5 Module Federation — the standard for micro frontend architecture used by Netflix, Amazon, Microsoft, and hundreds more."
 ---
 
-## Setting up
-
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Run your first federated application in 5 minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Core Concepts" icon="book-open" href="/core-concepts">
+    Understand hosts, remotes, exposed modules, and shared dependencies
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Basic Host/Remote" icon="code" href="/examples/basic-host-remote">
+    The essential pattern: one app consuming components from another
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Browse All Examples" icon="grid-2" href="/examples/react">
+    Explore by framework, build tool, or pattern
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What you'll find here
 
-Everything you need to create world-class documentation.
+This repository is maintained by the creators of Module Federation. Every example is a fully working application you can clone and run locally.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Foundational" icon="layer-group" href="/examples/basic-host-remote">
+    Host/remote, bi-directional, dynamic loading
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Build Tools" icon="wrench" href="/examples/webpack">
+    Webpack, Rspack, Vite
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Frameworks" icon="puzzle-piece" href="/examples/react">
+    React, Vue, Angular, Svelte
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="SSR" icon="server" href="/examples/ssr-overview">
+    Next.js, React 18, streaming SSR
   </Card>
-</Columns>
+  <Card title="Advanced" icon="gear" href="/examples/shared-dependencies">
+    Routing, state, runtime plugins
+  </Card>
+  <Card title="TypeScript" icon="file-code" href="/examples/typescript">
+    Type-safe federation with type streaming
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Used in production by
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Netflix · Amazon · Microsoft · Shopify · PayPal · Adobe · Alibaba · Tencent · Wayfair · Indeed · Cisco · Home Depot · Epic Games · and hundreds more.
+
+<Note>
+  All examples use [pnpm](https://pnpm.io/) workspaces. Install pnpm and run `pnpm install` from the repo root, then `pnpm start` from any example directory.
+</Note>

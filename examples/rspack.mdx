@@ -1,0 +1,484 @@
+---
+title: "Rspack"
+description: "High-performance Rust-based bundler with full Module Federation support"
+---
+
+Rspack is a Rust-based JavaScript bundler that is API-compatible with Webpack. It achieves significantly faster build and HMR times by parallelising work across Rust threads, while supporting the same Module Federation configuration shape through `@module-federation/enhanced/rspack`.
+
+<CardGroup cols={3}>
+  <Card title="Rust-powered" icon="bolt">
+    Parallel compilation across CPU cores via Rust's ownership model. Typical builds are 5–10× faster than equivalent Webpack builds.
+  </Card>
+  <Card title="Webpack compatible" icon="plug">
+    Accepts the same `module`, `plugins`, `optimization`, and `output` config keys as Webpack 5. Most Webpack loaders and plugins work without changes.
+  </Card>
+  <Card title="Full Module Federation" icon="network">
+    `@module-federation/enhanced/rspack` is the Rspack-specific entry point of the same enhanced plugin that works with Webpack, enabling cross-bundler federation.
+  </Card>
+</CardGroup>
+
+## Plugin import
+
+The only change needed to migrate a Webpack federation config to Rspack is the plugin import path and the HTML plugin:
+
+<CodeGroup>
+
+```javascript rspack.config.js
+// Rspack
+const { HtmlRspackPlugin } = require('@rspack/core');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+```
+
+```javascript webpack.config.js
+// Webpack
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+```
+
+</CodeGroup>
+
+The `ModuleFederationPlugin` configuration — `name`, `filename`, `exposes`, `remotes`, `shared`, `experiments`, `shareStrategy` — is identical between both bundlers.
+
+## Rspack host configuration
+
+The example below is **app-01** from the `rspack-webpack-interop` example running as an Rspack host (the same app also has a Webpack config for comparison).
+
+```javascript rspack.config.js (app-01, host)
+const { HtmlRspackPlugin } = require('@rspack/core');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+
+const deps = require('./package.json').dependencies;
+
+module.exports = {
+  entry: './src/index',
+
+  mode: 'development',
+  devtool: 'source-map',
+
+  optimization: {
+    minimize: false,
+  },
+
+  output: {
+    publicPath: 'auto',
+  },
+
+  module: {
+    rules: [
+      {
+        test: /\.jsx?$/,
+        use: {
+          // builtin:swc-loader is Rspack's native SWC loader —
+          // no babel-loader or @babel/preset-react needed
+          loader: 'builtin:swc-loader',
+          options: {
+            jsc: {
+              parser: {
+                syntax: 'ecmascript',
+                jsx: true,
+              },
+            },
+          },
+        },
+        exclude: /node_modules/,
+      },
+      {
+        test: /\.md$/,
+        // Rspack uses asset modules natively; no raw-loader required
+        type: 'asset/source',
+      },
+    ],
+  },
+
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'app_01',
+      filename: 'remoteEntry.js',
+
+      remotes: {
+        app_02: 'app_02@http://localhost:3002/remoteEntry.js',
+        app_03: 'app_03@http://localhost:3003/remoteEntry.js',
+        app_04: 'app_04@http://localhost:3004/remoteEntry.js',
+        app_05: 'app_05@http://localhost:3005/remoteEntry.js',
+      },
+
+      exposes: {
+        './SideNav': './src/SideNav',
+        './Page': './src/Page',
+      },
+
+      experiments: {
+        asyncStartup: true,
+      },
+
+      shareStrategy: 'loaded-first',
+
+      shared: {
+        // Spread all package.json deps as shared modules, then override
+        // framework libraries with singleton constraints
+        ...deps,
+        react: { singleton: true, eager: true },
+        'react-dom': { singleton: true, eager: true },
+        'react-router-dom': { singleton: true, eager: true },
+        '@material-ui/core': { singleton: true, eager: true },
+      },
+    }),
+    new HtmlRspackPlugin({
+      template: './public/index.html',
+    }),
+  ],
+};
+```
+
+## Rspack remote configuration
+
+```javascript rspack.config.js (app-02, remote)
+const { HtmlRspackPlugin } = require('@rspack/core');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+
+module.exports = {
+  entry: './src/index',
+
+  mode: 'development',
+  devtool: 'source-map',
+
+  optimization: { minimize: false },
+
+  resolve: {
+    extensions: ['.jsx', '.js', '.json', '.mjs'],
+  },
+
+  output: {
+    publicPath: 'auto',
+  },
+
+  module: {
+    rules: [
+      {
+        test: /\.jsx?$/,
+        use: {
+          loader: 'builtin:swc-loader',
+          options: {
+            jsc: {
+              parser: {
+                syntax: 'ecmascript',
+                jsx: true,
+              },
+            },
+          },
+        },
+        exclude: /node_modules/,
+      },
+    ],
+  },
+
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'app_02',
+      filename: 'remoteEntry.js',
+
+      // Bidirectional — this remote also consumes from other apps
+      remotes: {
+        app_01: 'app_01@http://localhost:3001/remoteEntry.js',
+        app_03: 'app_03@http://localhost:3003/remoteEntry.js',
+      },
+
+      exposes: {
+        './Dialog': './src/Dialog',
+        './Tabs': './src/Tabs',
+      },
+
+      experiments: {
+        asyncStartup: true,
+      },
+
+      shareStrategy: 'loaded-first',
+
+      shared: {
+        react: { singleton: true, eager: true },
+        'react-dom': { singleton: true, eager: true },
+        'react-router-dom': { singleton: true, eager: true },
+        '@material-ui/core': { singleton: true, eager: true },
+      },
+    }),
+    new HtmlRspackPlugin({
+      template: './public/index.html',
+      chunks: ['main'],
+    }),
+  ],
+};
+```
+
+## Rspack ↔ Webpack interoperability
+
+The `rspack-webpack-interop` example demonstrates a 5-app federated system where a **Webpack host** consumes modules from **Rspack remotes** spanning three different UI frameworks.
+
+### Architecture
+
+<CardGroup cols={2}>
+  <Card title="App 1 — Webpack host (port 3001)" icon="house">
+    React 18. Consumes remotes from all four Rspack apps. Also exposes `./SideNav` and `./Page` for bidirectional use.
+  </Card>
+  <Card title="App 2 — Rspack remote (port 3002)" icon="react">
+    React 18. Exposes `./Dialog` and `./Tabs`. Consumes back from app-01 and app-03.
+  </Card>
+  <Card title="App 3 — Rspack remote (port 3003)" icon="react">
+    React 18. Standalone remote exposing additional components.
+  </Card>
+  <Card title="App 4 — Rspack remote (port 3004)" icon="wind">
+    Svelte. Uses `svelte-loader` in Rspack. Exposes `./App` and `./loadApp`.
+  </Card>
+</CardGroup>
+
+<Card title="App 5 — Rspack remote (port 3005)" icon="zap">
+  LitElement with TypeScript. Uses `builtin:swc-loader` with TypeScript syntax. Exposes `./ActionButton`, `./AlertBox`, and `./components`.
+</Card>
+
+### How configs differ between bundlers
+
+| Concern | Webpack | Rspack |
+|---------|---------|--------|
+| Plugin import | `@module-federation/enhanced/webpack` | `@module-federation/enhanced/rspack` |
+| HTML plugin | `html-webpack-plugin` | `@rspack/core` → `HtmlRspackPlugin` |
+| JSX transform | `babel-loader` + `@babel/preset-react` | `builtin:swc-loader` (no extra deps) |
+| TypeScript | `ts-loader` or `babel-loader` | `builtin:swc-loader` with `syntax: 'typescript'` |
+| Asset modules | `raw-loader`, `file-loader`, etc. | Native `type: 'asset/source'`, `type: 'css'`, etc. |
+| Module Federation config | Identical | Identical |
+
+<Note>
+  The `@module-federation/enhanced` plugin produces the same `remoteEntry.js` format from both Webpack and Rspack builds. A Webpack host does not know or care whether its remotes were built with Webpack or Rspack.
+</Note>
+
+### Svelte remote (app-04)
+
+Rspack handles Svelte via `svelte-loader` with the native CSS experiments flag:
+
+```javascript rspack.config.js (app-04, Svelte)
+const { HtmlRspackPlugin } = require('@rspack/core');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+
+const mode = process.env.NODE_ENV || 'development';
+
+module.exports = {
+  entry: './src/main.js',
+  resolve: {
+    extensions: ['.mjs', '.js', '.svelte'],
+    mainFields: ['svelte', 'browser', 'module', 'main'],
+    conditionNames: ['svelte', 'browser', 'import'],
+  },
+  output: {
+    publicPath: 'auto',
+  },
+  module: {
+    rules: [
+      {
+        test: /\.svelte$/,
+        use: {
+          loader: 'svelte-loader',
+          options: { emitCss: true, hotReload: true },
+        },
+      },
+      {
+        test: /\.css$/,
+        type: 'css', // Rspack native CSS handling — no css-loader needed
+      },
+    ],
+  },
+  mode,
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'app_04',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './App': './src/main.js',
+        './loadApp': './src/loadApp.js',
+      },
+      experiments: { asyncStartup: true },
+      shareStrategy: 'loaded-first',
+      shared: [],
+    }),
+    new HtmlRspackPlugin({
+      template: './src/index.html',
+      chunks: ['main'],
+    }),
+  ],
+  devtool: mode === 'production' ? false : 'source-map',
+  experiments: {
+    css: true, // Enable Rspack's native CSS module support
+  },
+};
+```
+
+### LitElement remote (app-05)
+
+```javascript rspack.config.js (app-05, LitElement + TypeScript)
+const { HtmlRspackPlugin } = require('@rspack/core');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+
+module.exports = {
+  entry: './src/index.ts',
+  module: {
+    rules: [
+      {
+        test: /\.(ts|tsx)$/,
+        exclude: /node_modules/,
+        use: [
+          {
+            loader: 'builtin:swc-loader',
+            options: {
+              jsc: {
+                parser: {
+                  syntax: 'typescript',
+                  decorators: true, // required for LitElement decorators
+                  jsx: true,
+                },
+                transform: {
+                  react: { runtime: 'automatic' },
+                },
+              },
+            },
+          },
+        ],
+      },
+    ],
+  },
+  resolve: {
+    extensions: ['.tsx', '.ts', '.js', '.mjs'],
+  },
+  output: {
+    publicPath: 'auto',
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'app_05',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './ActionButton': './src/components/action-button.ts',
+        './AlertBox': './src/components/alert-box.ts',
+        './components': './src/index.ts',
+      },
+      experiments: { asyncStartup: true },
+      shareStrategy: 'loaded-first',
+      shared: [],
+    }),
+    new HtmlRspackPlugin({
+      title: 'LitHTML Typescript Example',
+      filename: 'index.html',
+      template: 'src/index.html',
+    }),
+  ],
+};
+```
+
+## asyncStartup experiment
+
+All apps in the interop example use `experiments: { asyncStartup: true }`. This eliminates the need for a manual async entry boundary:
+
+```javascript
+new ModuleFederationPlugin({
+  name: 'app_01',
+  experiments: {
+    asyncStartup: true,
+  },
+  // ...
+})
+```
+
+Without this flag, Rspack (like Webpack) requires an async entry boundary when any shared module is marked `eager: true`. `asyncStartup` wraps the entry automatically.
+
+## HMR with Rspack
+
+The `rspack_hmr` example shows Hot Module Replacement working in a federated Rspack setup. The host uses `@rspack/plugin-react-refresh` alongside `ModuleFederationPlugin`:
+
+```javascript rspack.config.js (HMR host)
+const rspack = require('@rspack/core');
+const refreshPlugin = require('@rspack/plugin-react-refresh');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/rspack');
+
+const isDev = process.env.NODE_ENV === 'development';
+
+module.exports = {
+  entry: { main: './src/index.tsx' },
+  devServer: {
+    port: 3000,
+    hot: true,
+    liveReload: false,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+    },
+  },
+  plugins: [
+    isDev && new rspack.HotModuleReplacementPlugin(),
+    new ModuleFederationPlugin({
+      name: 'app_01',
+      filename: 'remoteEntry.js',
+      experiments: { asyncStartup: true },
+      remotes: {
+        app_02: 'app_02@http://localhost:3001/mf-manifest.json',
+      },
+      shared: ['react', 'react-dom'],
+    }),
+    isDev ? new refreshPlugin() : null,
+  ].filter(Boolean),
+};
+```
+
+<Tip>
+  Rspack's `devServer.hot: true` combined with `@rspack/plugin-react-refresh` provides full React Fast Refresh in federated apps — HMR changes in a remote propagate to the host without a full page reload.
+</Tip>
+
+## Running the interop example
+
+<Steps>
+  <Step title="Install dependencies">
+    From the repository root, install all workspace packages:
+
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Start all apps">
+    ```bash
+    cd rspack-webpack-interop
+    pnpm start
+    ```
+
+    This builds and serves all five apps concurrently.
+  </Step>
+  <Step title="Access the apps">
+    | App | URL | Role |
+    |-----|-----|------|
+    | App 1 (Webpack host) | http://localhost:3001 | Main shell |
+    | App 2 (Rspack, React) | http://localhost:3002 | Remote |
+    | App 3 (Rspack, React) | http://localhost:3003 | Remote |
+    | App 4 (Rspack, Svelte) | http://localhost:3004 | Remote |
+    | App 5 (Rspack, LitElement) | http://localhost:3005 | Remote |
+  </Step>
+  <Step title="Verify remote entries are reachable">
+    ```bash
+    curl http://localhost:3002/remoteEntry.js
+    curl http://localhost:3003/remoteEntry.js
+    curl http://localhost:3004/remoteEntry.js
+    curl http://localhost:3005/remoteEntry.js
+    ```
+  </Step>
+</Steps>
+
+### Available scripts
+
+```bash
+# Build + serve all apps
+pnpm start
+
+# Build for production
+pnpm build
+
+# Serve pre-built output
+pnpm serve
+
+# Remove build artifacts
+pnpm clean
+
+# Run Playwright end-to-end tests
+pnpm run test:e2e
+```

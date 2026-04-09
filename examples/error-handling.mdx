@@ -1,0 +1,251 @@
+---
+title: "Error handling"
+description: "Handle remote module loading failures gracefully using error boundaries and fallback strategies"
+---
+
+Remote modules can fail to load for reasons outside your control: the remote server is down, a network request times out, a version mismatch causes the remote container to reject initialization, or a CDN edge node serves a stale manifest. Unhandled failures produce blank screens or uncaught promise rejections that crash the entire host application.
+
+The patterns in this section let you contain failures to the affected micro frontend and keep the rest of the application functional.
+
+## Why remote modules fail
+
+<AccordionGroup>
+  <Accordion title="Remote is offline">
+    If the server serving `remoteEntry.js` is unreachable, the browser's `<script>` injection fails with a network error. The federation runtime throws an unhandled rejection unless you wrap the import.
+  </Accordion>
+
+  <Accordion title="Version mismatch">
+    When `requiredVersion` is set and no loaded instance satisfies it, the runtime either logs a warning (default) or throws (when `strictVersion: true`). In singleton mode a mismatch can cause subtle bugs rather than an explicit error.
+  </Accordion>
+
+  <Accordion title="Remote container initialization failure">
+    The remote's own bootstrap code may throw — for example, if it tries to access an API at startup that is unavailable. This surfaces as a rejected promise on the dynamic import.
+  </Accordion>
+
+  <Accordion title="Chunk loading errors">
+    After the container is initialized, lazy loading individual exposed modules can still fail if the chunk file is missing or the CDN returns a non-200 response.
+  </Accordion>
+</AccordionGroup>
+
+## The `error-boundary` example
+
+This example demonstrates the full offline-remote failure scenario. Only `app1` is started; `app2` remains offline.
+
+| App  | Port | State   |
+| ---- | ---- | ------- |
+| app1 | 3001 | Running |
+| app2 | 3002 | Offline |
+
+`app1` declares `app2` as a remote and lazily imports `app2/Button`. Because `app2` is offline, the import fails. A runtime plugin intercepts the failure and renders an error message as a React module in place of the missing component. The rest of the application continues to function normally.
+
+### Configuration
+
+`app1` uses `@module-federation/enhanced` with `asyncStartup: true`, which defers module execution to after federation has initialized — a prerequisite for plugins that need to intercept early lifecycle hooks.
+
+<CodeGroup>
+
+```js error-boundary/app1/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const deps = require('./package.json').dependencies;
+
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'app1',
+  filename: 'remoteEntry.js',
+  remotes: {
+    app2: 'app2@http://localhost:3002/remoteEntry.js',
+  },
+  exposes: {
+    './Button': './src/Button',
+  },
+  shared: {
+    ...deps,
+    react: { singleton: true },
+    'react-dom': { singleton: true },
+  },
+})
+```
+
+```js error-boundary/app1/rspack.config.js
+const {
+  HtmlRspackPlugin,
+  container: { ModuleFederationPlugin },
+} = require('@rspack/core');
+const deps = require('./package.json').dependencies;
+
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'app1',
+  filename: 'remoteEntry.js',
+  remotes: {
+    app2: 'app2@http://localhost:3002/remoteEntry.js',
+  },
+  exposes: {
+    './Button': './src/Button',
+  },
+  shared: {
+    ...deps,
+    react: { singleton: true },
+    'react-dom': { singleton: true },
+    lodash: {},
+  },
+})
+```
+
+</CodeGroup>
+
+### React error boundary wrapping the remote import
+
+`app1/src/App.js` wraps the lazy remote import in both `React.Suspense` (for the loading state) and a class-based `ErrorBoundary` (for the failure state). If `app2/Button` fails to load for any reason, `ErrorBoundary` catches it and renders a fallback message instead of crashing the page.
+
+```jsx error-boundary/app1/src/App.js
+import React from 'react';
+import LocalButton from './Button';
+
+const RemoteButtonLazy = React.lazy(() => import('app2/Button'));
+
+const App = () => (
+  <div>
+    <h1>Offline Remote</h1>
+    <h2>Remotes currently in use</h2>
+    {__FEDERATION__.__INSTANCES__.map(inst => (
+      <span key={inst.name}>{inst.name}</span>
+    ))}
+    <LocalButton />
+    <ErrorBoundary>
+      <React.Suspense fallback="Loading Button">
+        <RemoteButtonLazy />
+      </React.Suspense>
+    </ErrorBoundary>
+    <button onClick={() => { localStorage.clear('button'); window.location.reload(); }}>
+      Reset
+    </button>
+  </div>
+);
+
+class ErrorBoundary extends React.Component {
+  state = { hasError: false };
+
+  componentDidCatch(error, errorInfo) {
+    console.error(error, errorInfo);
+    this.setState({ hasError: true });
+  }
+
+  render() {
+    const { children } = this.props;
+    if (this.state.hasError) {
+      return (
+        <div>
+          <h1>Something went wrong</h1>
+          <p>Try refreshing the page.</p>
+        </div>
+      );
+    }
+    return children;
+  }
+}
+```
+
+### Running the example
+
+<Steps>
+  <Step title="Start only app1">
+    ```bash
+    cd error-boundary/app1
+    pnpm start
+    ```
+    Do **not** start `app2`. Leave port 3002 empty.
+  </Step>
+
+  <Step title="Open the host">
+    Navigate to [http://localhost:3001](http://localhost:3001). The page loads and renders the local button. The area where `app2/Button` would appear shows the error boundary fallback instead.
+  </Step>
+
+  <Step title="Inspect the runtime">
+    Open the browser console. You will see the network error for `http://localhost:3002/remoteEntry.js` and the error caught by `componentDidCatch`. The rest of the application is unaffected.
+  </Step>
+</Steps>
+
+## React error boundaries with federated components
+
+The pattern from the example generalizes to any federated component. Wrap every remote import in the same structure:
+
+```jsx
+import React from 'react';
+
+const RemoteComponent = React.lazy(() => import('remote/Component'));
+
+function SafeRemote() {
+  return (
+    <ErrorBoundary fallback={<p>Remote unavailable.</p>}>
+      <React.Suspense fallback={<p>Loading...</p>}>
+        <RemoteComponent />
+      </React.Suspense>
+    </ErrorBoundary>
+  );
+}
+```
+
+<Warning>
+  `React.Suspense` alone does not catch errors — it only handles the loading state. You must combine it with an `ErrorBoundary` to handle load failures. A pending `React.lazy` that rejects will propagate to the nearest error boundary, not the nearest `Suspense` boundary.
+</Warning>
+
+## Retry and fallback patterns
+
+### Promise-based remote with inline fallback
+
+The `shared-routes2` example shows how to wrap the remote declaration itself in a `Promise` that resolves to a stub container when the remote is offline. This prevents the error from reaching React at all:
+
+```js webpack.config.js
+remotes: {
+  app2: `promise new Promise(function (resolve, reject) {
+    __webpack_require__.l(
+      "http://localhost:3002/remoteEntry.js",
+      function (event) {
+        if (typeof app2 !== 'undefined') return resolve();
+        reject(new Error('Loading script failed'));
+      },
+      "app2",
+    );
+  }).catch(function(e) {
+    console.log('remote offline, using stub');
+    return {
+      get: (module, scope) => () => [],
+      init: () => {},
+    };
+  })`,
+},
+```
+
+The stub container returns an empty module list for every `get` call, so `React.lazy` receives an empty module and the Suspense fallback or error boundary handles the empty result.
+
+### Runtime plugin fallback
+
+For more control, implement a runtime plugin that intercepts `loadRemote` or container initialization failures and returns a synthetic module. The `offline-remote` example in `runtime-plugins/offline-remote` demonstrates this approach: the plugin catches the network failure and renders a React error message directly as the remote module, so consumers never see an exception.
+
+## Self-healing for missing shared dependencies
+
+A related failure mode is when a remote expects a shared dependency that the host did not provide. Module Federation handles this automatically through the self-healing mechanism: the runtime fetches the missing package from the remote's own bundle rather than failing.
+
+See [Shared dependencies](/examples/shared-dependencies) for a full walkthrough of the `self-healing` example.
+
+## Best practices
+
+<CardGroup cols={2}>
+  <Card title="Always wrap remote imports in Suspense + ErrorBoundary" icon="shield">
+    Every `React.lazy(() => import('remote/X'))` call must be wrapped in both. Suspense handles the pending state; ErrorBoundary handles the rejected state. Neither alone is sufficient.
+  </Card>
+  <Card title="Provide meaningful fallback UI" icon="layout">
+    The `fallback` prop on `Suspense` and the error render in `ErrorBoundary` should match the approximate size of the missing component to prevent layout shift. A skeleton or placeholder beats a blank space or an abrupt error message.
+  </Card>
+  <Card title="Log errors in componentDidCatch" icon="terminal">
+    Call `console.error` or send to your error tracking service inside `componentDidCatch`. Silent swallowing makes diagnosing remote load failures in production very difficult.
+  </Card>
+  <Card title="Test with remotes offline" icon="wifi-slash">
+    Regularly run your host application with one or more remotes intentionally stopped. This validates that your error boundaries behave correctly and that the rest of the application remains functional.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Use a shared `RemoteBoundary` wrapper component in your design system that combines `Suspense` and `ErrorBoundary` with consistent loading and error states. This prevents teams from forgetting one of the two and keeps the fallback UI consistent across all federated components.
+</Tip>

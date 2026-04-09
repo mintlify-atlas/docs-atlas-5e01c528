@@ -1,0 +1,581 @@
+---
+title: "TypeScript"
+description: "Full TypeScript support with automatic type streaming between federated applications"
+---
+
+Module Federation supports TypeScript out of the box. The `@module-federation/typescript` package extends this with automatic type streaming — remotes generate `.d.ts` files at build time and push them to hosts so you get full type-safety across application boundaries without manually maintaining type stubs.
+
+<CardGroup cols={2}>
+  <Card title="Type streaming" icon="arrow-right-arrow-left">
+    Remotes publish `.d.ts` files; hosts download them automatically at startup.
+  </Card>
+  <Card title="Project references" icon="link">
+    Use TypeScript project references instead of the plugin for monorepo setups.
+  </Card>
+  <Card title="Different React versions" icon="code-branch">
+    Type-safe adapters let old and new React versions coexist in one federation.
+  </Card>
+  <Card title="Node + TypeScript" icon="server">
+    Dynamic remote loading on the server with full TypeScript support.
+  </Card>
+</CardGroup>
+
+## The `@module-federation/typescript` plugin
+
+The `FederatedTypesPlugin` runs alongside `ModuleFederationPlugin`. On the remote it compiles exposed modules to `.d.ts` files and serves them. On the host it downloads those files into a local `@mf-types/` directory that TypeScript resolves through `paths`.
+
+### Installation
+
+```bash
+npm i @module-federation/typescript
+```
+
+### How it works
+
+<Steps>
+  <Step title="Remote compiles types">
+    When the remote's webpack dev server starts, `FederatedTypesPlugin` generates `.d.ts` files for every module listed in `exposes` and serves them at `/@mf-types/`.
+  </Step>
+  <Step title="Host downloads types">
+    The host's `FederatedTypesPlugin` fetches those files and writes them into `app1/@mf-types/<remoteName>/`.
+  </Step>
+  <Step title="TypeScript resolves imports">
+    The host's `tsconfig.json` maps the wildcard path `*` to `./@mf-types/*`, so `import type Button from 'app2/Button'` resolves to the downloaded declaration file without any manual stubs.
+  </Step>
+</Steps>
+
+### Remote webpack config (`app2/webpack.config.js`)
+
+```javascript app2/webpack.config.js
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { FederatedTypesPlugin } = require('@module-federation/typescript');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const path = require('path');
+
+const pkg = require('./package.json');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+      'Access-Control-Allow-Headers': 'X-Requested-With, content-type, Authorization',
+    },
+    static: { directory: path.join(__dirname, 'dist') },
+    port: 3002,
+  },
+  output: { publicPath: 'auto' },
+  resolve: { extensions: ['.ts', '.tsx', '.js'] },
+  module: {
+    rules: [
+      {
+        test: /\.tsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react', '@babel/preset-typescript'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app2',
+      filename: 'remoteEntry.js',
+      exposes: { './Button': './src/Button' },
+      shared: [
+        { react: { singleton: true, requiredVersion: pkg.dependencies.react } },
+        { 'react-dom': { singleton: true, requiredVersion: pkg.dependencies['react-dom'] } },
+      ],
+    }),
+    new FederatedTypesPlugin({
+      disableDownloadingRemoteTypes: true,
+      federationConfig: {
+        name: 'app2',
+        filename: 'remoteEntry.js',
+        exposes: { './Button': './src/Button' },
+        shared: [
+          { react: { singleton: true, requiredVersion: pkg.dependencies.react } },
+          { 'react-dom': { singleton: true, requiredVersion: pkg.dependencies['react-dom'] } },
+        ],
+      },
+    }),
+    new HtmlWebpackPlugin({ template: './public/index.html' }),
+  ],
+};
+```
+
+### Host webpack config (`app1/webpack.config.js`)
+
+```javascript app1/webpack.config.js
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { FederatedTypesPlugin } = require('@module-federation/typescript');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const path = require('path');
+
+const pkg = require('./package.json');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+      'Access-Control-Allow-Headers': 'X-Requested-With, content-type, Authorization',
+    },
+    static: { directory: path.join(__dirname, 'dist') },
+    port: 3001,
+  },
+  output: { publicPath: 'auto' },
+  resolve: { extensions: ['.ts', '.tsx', '.js'] },
+  module: {
+    rules: [
+      {
+        test: /\.tsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react', '@babel/preset-typescript'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'app1',
+      filename: 'remoteEntry.js',
+      remotes: { app2: 'app2@http://localhost:3002/remoteEntry.js' },
+      shared: [
+        { react: { singleton: true, requiredVersion: pkg.dependencies.react } },
+        { 'react-dom': { singleton: true, requiredVersion: pkg.dependencies['react-dom'] } },
+      ],
+    }),
+    new FederatedTypesPlugin({
+      disableDownloadingRemoteTypes: true,
+      federationConfig: {
+        name: 'app1',
+        filename: 'remoteEntry.js',
+        remotes: { app2: 'app2@http://localhost:3002/remoteEntry.js' },
+        shared: [
+          { react: { singleton: true, requiredVersion: pkg.dependencies.react } },
+          { 'react-dom': { singleton: true, requiredVersion: pkg.dependencies['react-dom'] } },
+        ],
+      },
+    }),
+    new HtmlWebpackPlugin({ template: './public/index.html' }),
+  ],
+};
+```
+
+<Note>
+  `federationConfig` passed to `FederatedTypesPlugin` must match the config passed to `ModuleFederationPlugin`. The plugin uses it to know which remotes to fetch types from and which exposed modules to compile.
+</Note>
+
+### `tsconfig.json` (host and remote)
+
+Both applications use the same `tsconfig.json` pattern. The critical part is the `paths` alias that points every bare module import to the generated `@mf-types/` directory.
+
+```json app1/tsconfig.json
+{
+  "compilerOptions": {
+    "sourceMap": true,
+    "strict": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "*": ["./@mf-types/*"]
+    }
+  },
+  "include": ["src/**/*"]
+}
+```
+
+When `FederatedTypesPlugin` runs it writes files such as:
+
+```
+app1/
+└── @mf-types/
+    └── app2/
+        ├── Button.d.ts       ← re-exports from _types/Button
+        └── _types/
+            └── Button.d.ts   ← generated from app2/src/Button.tsx
+```
+
+## Type-safe remote imports
+
+The remote exposes a typed React component:
+
+```tsx app2/src/Button.tsx
+import React from 'react';
+
+type ButtonProps = {
+  size: 'small' | 'large';
+};
+
+const Button: React.FC<ButtonProps> = ({ size }) => {
+  if (size === 'large') {
+    return <button>App2 Large Button</button>;
+  }
+  return <button>App 2 Small Button</button>;
+};
+
+export default Button;
+```
+
+The host imports the generated type declaration to get proper prop types on the lazy-loaded component:
+
+```tsx app1/src/App.tsx
+import React from 'react';
+// @mf-types directory is autogenerated when you start the server
+import RemoteButtonType from '../@mf-types/Button';
+
+// @ts-expect-error app2/Button is a federated module.
+const RemoteButton = React.lazy(() => import('app2/Button')) as unknown as typeof RemoteButtonType;
+
+const App = () => (
+  <div>
+    <h1>Typescript</h1>
+    <h2>App 1</h2>
+    <React.Suspense fallback="Loading Button">
+      <RemoteButton size="large" />
+      <br />
+      <RemoteButton size="small" />
+    </React.Suspense>
+  </div>
+);
+
+export default App;
+```
+
+<Info>
+  The `@ts-expect-error` comment is needed because TypeScript does not know about the federated module import at compile time. Casting through the downloaded type file gives you prop-level type safety while suppressing the unresolvable module error.
+</Info>
+
+## Running the typescript example
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    cd typescript
+    pnpm install
+    ```
+  </Step>
+  <Step title="Start both apps">
+    ```bash
+    pnpm run start
+    ```
+    This starts app1 on [localhost:3001](http://localhost:3001) and app2 on [localhost:3002](http://localhost:3002).
+  </Step>
+</Steps>
+
+## TypeScript with different React versions
+
+The `different-react-versions-typescript` example demonstrates loading a React 18 remote from a React 16 host with full type safety. It uses two adapter components to bridge the incompatible React APIs.
+
+**ReactAdapterProvider** (in the React 18 remote) renders a modern component using the host's older React version via `ReactDOM.render`:
+
+```tsx app2/src/components/ReactAdapterProvider.tsx
+import React from 'react';
+import ReactDOM from 'react-dom';
+
+export type ReactAdapterProviderProps<P = {}> = P & {
+  component: React.FunctionComponent<P> | React.ComponentClass<P> | keyof React.ReactHTML | string;
+  children?: React.ReactNode;
+};
+
+class ReactAdapterProvider<P = {}> extends React.Component<ReactAdapterProviderProps<P>> {
+  private refHold: HTMLDivElement | null = null;
+
+  init = (hydrate?: boolean) => {
+    (async () => {
+      const { component, children, ...rest } = this.props;
+      const renderMethod = hydrate ? ReactDOM.hydrate : ReactDOM.render;
+      renderMethod(React.createElement(component as string, rest, children), this.refHold);
+    })();
+  };
+
+  componentDidMount() { this.init(); }
+  componentDidUpdate() { this.init(true); }
+
+  render() {
+    return <div ref={ref => (this.refHold = ref)} />;
+  }
+}
+
+export default ReactAdapterProvider;
+```
+
+**ReactAdapterConsumer** (in the React 16 host) loads the remote component using a typed generic parameter:
+
+```tsx app1/src/components/ReactAdapterConsumer.tsx
+import React from 'react';
+
+export type ReactAdapterConsumerProps<P = {}> = Partial<P> & {
+  fallback: React.SuspenseProps['fallback'];
+  importer: () => Promise<{
+    default: React.ComponentType<P> | React.ExoticComponent<P> | React.FunctionComponent<P>;
+  }>;
+};
+
+class ReactAdapterConsumer<P = {}> extends React.Component<ReactAdapterConsumerProps<P>> {
+  private RemoteComponent: React.LazyExoticComponent<React.ComponentType<P>>;
+
+  constructor(props: ReactAdapterConsumerProps<P>) {
+    super(props);
+    this.RemoteComponent = React.lazy(() => this.props.importer());
+  }
+
+  render() {
+    return (
+      <React.Suspense fallback={this.props.fallback}>
+        <this.RemoteComponent {...(this.props as P)} />
+      </React.Suspense>
+    );
+  }
+}
+
+export default ReactAdapterConsumer;
+```
+
+Usage in the host — notice how the generic parameter provides prop-level type checking:
+
+```tsx
+import type { ButtonProps } from 'app2/Button';
+
+<ReactAdapterConsumer<ButtonProps>
+  color="blue"
+  fallback={<div>Loading...</div>}
+  importer={() => import('app2/Button').then(module => ({ default: module.Adapted }))}
+/>
+```
+
+The `different-react-versions-typescript` example also uses the built-in `dts: true` option in `ModuleFederationPlugin` as an alternative to `FederatedTypesPlugin`:
+
+```javascript app1/webpack.config.js
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'app1',
+  dts: true,   // built-in type generation — no separate FederatedTypesPlugin needed
+  remotes: { app2: 'app2@http://localhost:3002/remoteEntry.js' },
+  // ...
+})
+```
+
+## Dynamic remote loading with TypeScript (Node)
+
+The `dynamic-remotes-node-typescript` example runs Module Federation on a Node.js server. Remotes are loaded at runtime via `@module-federation/runtime` and `@module-federation/node`.
+
+```typescript host/src/index.ts
+import { loadRemote, init } from '@module-federation/runtime';
+import { performReload, revalidate } from '@module-federation/node/utils';
+
+async function initAndLoad() {
+  await performReload(true);
+
+  init({
+    name: 'host',
+    remotes: [
+      { name: 'remote', entry: 'http://localhost:3002/remoteEntry.js' },
+    ],
+  });
+
+  const loadedString = ((await loadRemote('remote/string')) as any).default;
+  console.log('loaded string', loadedString);
+
+  const loadedClass = ((await loadRemote('remote/class')) as any).default;
+  const instance = loadedClass ? new loadedClass() : null;
+  console.log(await instance?.runTest());
+}
+
+initAndLoad();
+
+setInterval(async () => {
+  const shouldReload = await revalidate();
+  if (shouldReload) {
+    initAndLoad();
+  }
+}, 5000);
+```
+
+The remote exposes typed modules directly:
+
+```typescript remote/src/expose-class.ts
+export default class TestClass {
+  testValue = 'initial value';
+
+  async runTest() {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    return 'test complete';
+  }
+
+  getTestValue() {
+    return this.testValue;
+  }
+}
+```
+
+```typescript remote/src/expose-string.ts
+export default 'dynamically consumed';
+```
+
+The host webpack config uses `UniversalFederationPlugin` with `target: 'async-node'` and `ts-loader` with type-checking enabled:
+
+```javascript host/webpack.config.js
+const { UniversalFederationPlugin } = require('@module-federation/node');
+
+module.exports = {
+  entry: './src/index.ts',
+  mode: 'development',
+  target: 'async-node',
+  resolve: { extensions: ['.ts', '.tsx', '.js'] },
+  module: {
+    rules: [
+      {
+        test: /\.tsx?$/,
+        use: [
+          {
+            loader: 'ts-loader',
+            options: { transpileOnly: false }, // enables type-checking and .d.ts emission
+          },
+        ],
+        exclude: /node_modules/,
+      },
+    ],
+  },
+  plugins: [
+    new UniversalFederationPlugin({
+      remoteType: 'script',
+      isServer: true,
+      name: 'host',
+      useRuntimePlugin: true,
+      exposes: { './noop': './src/noop.ts' },
+    }),
+  ],
+};
+```
+
+<Note>
+  HMR is not supported on the server side. The host polls for remote changes using `revalidate()` every 5 seconds instead.
+</Note>
+
+## Fallback types (`typescript-react-fallback`)
+
+The `typescript-react-fallback` example uses TypeScript project references to share types while rendering a fallback remote when the primary remote fails. It uses `react-error-boundary` combined with `@module-federation/utilities`.
+
+```tsx app1/src/App.tsx
+import * as React from 'react';
+import { ErrorBoundary } from 'react-error-boundary';
+import Components from './Components';
+import { importRemote } from '@module-federation/utilities';
+
+const FallbackRemote = React.lazy(() =>
+  importRemote({
+    url: 'http://localhost:3002',
+    scope: 'app2',
+    module: 'Button',
+  }),
+);
+
+const Fallback = () => (
+  <React.Suspense fallback="Loading Button">
+    <FallbackRemote />
+  </React.Suspense>
+);
+
+const App = () => (
+  <div>
+    <h1>Typescript</h1>
+    <h2>App 1</h2>
+    <ErrorBoundary fallbackRender={Fallback}>
+      <Components />
+    </ErrorBoundary>
+  </div>
+);
+
+export default App;
+```
+
+The `Components` component tries to load the primary remote. If it throws (e.g., the remote is unavailable), `ErrorBoundary` renders `FallbackRemote` using `importRemote` as an escape hatch that does not require a static type declaration.
+
+```tsx app1/src/Components.tsx
+import * as React from 'react';
+
+//@ts-ignore
+const RemoteButton = React.lazy(() => import('app2/Button'));
+
+const Components = () => (
+  <React.Suspense fallback="Loading Button">
+    <RemoteButton />
+  </React.Suspense>
+);
+
+export default Components;
+```
+
+The root `tsconfig.base.json` uses `paths` to resolve `app2/*` to the local source for type-checking without the streaming plugin:
+
+```json tsconfig.base.json
+{
+  "compilerOptions": {
+    "sourceMap": true,
+    "strict": true,
+    "jsx": "react",
+    "baseUrl": ".",
+    "composite": true,
+    "paths": {
+      "app2/*": ["./app2/src/*"]
+    }
+  },
+  "files": []
+}
+```
+
+## Common type errors
+
+<AccordionGroup>
+  <Accordion title="Cannot find module 'remoteName/Component'">
+    TypeScript does not know about federated modules by default. You have two options:
+
+    **Option 1 — Use `FederatedTypesPlugin`** and set `paths` in `tsconfig.json`:
+    ```json
+    {
+      "compilerOptions": {
+        "baseUrl": ".",
+        "paths": { "*": ["./@mf-types/*"] }
+      }
+    }
+    ```
+
+    **Option 2 — Declare the module manually** in a `.d.ts` file:
+    ```typescript global.d.ts
+    declare module 'app2/Button';
+    declare module 'app2/Layout';
+    ```
+  </Accordion>
+
+  <Accordion title="Type 'typeof import(...)' is not assignable">
+    When casting a lazy import to a typed component, use `as unknown as typeof LocalType`:
+    ```typescript
+    import RemoteButtonType from '../@mf-types/Button';
+
+    // @ts-expect-error app2/Button is a federated module.
+    const RemoteButton = React.lazy(() => import('app2/Button')) as unknown as typeof RemoteButtonType;
+    ```
+  </Accordion>
+
+  <Accordion title="@mf-types directory is empty or missing">
+    The `@mf-types/` directory is generated when the dev server starts. Start the **remote** first so it can serve types before the host tries to download them. In production, run the remote build before the host build.
+  </Accordion>
+
+  <Accordion title="ts-loader vs babel-loader for type generation">
+    `babel-loader` strips types without checking them and does not emit `.d.ts` files. If you need the compiler to emit declaration files (e.g., in the Node example), use `ts-loader` with `transpileOnly: false`. For browser apps using `FederatedTypesPlugin`, `babel-loader` works fine because the plugin handles type generation separately.
+  </Accordion>
+
+  <Accordion title="isolatedModules: true conflicts with type-only imports">
+    When `isolatedModules` is enabled (required by Babel), use `import type` for type-only imports:
+    ```typescript
+    import type { ButtonProps } from 'app2/Button';
+    ```
+  </Accordion>
+</AccordionGroup>

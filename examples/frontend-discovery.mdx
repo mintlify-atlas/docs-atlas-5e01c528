@@ -1,0 +1,314 @@
+---
+title: 'Frontend Discovery Service'
+description: 'Dynamically discover and load micro frontends using a service registry with blue/green deployments'
+keywords: ['frontend discovery', 'service registry', 'micro frontends', 'blue green', 'traffic shifting', 'AWS']
+---
+
+The Frontend Discovery Service example demonstrates how to run micro frontends with Webpack Module Federation using an AWS-based service registry. Instead of hardcoding remote URLs in the host build, the shell app fetches the list of available micro frontends — and their current URLs — from a discovery API at runtime. This decouples deployment of individual micro frontends from the host entirely.
+
+## Architecture
+
+```
+┌────────────────────────────────────────────────────┐
+│  AWS Frontend Service Discovery                    │
+│  ┌──────────────┐        ┌──────────────────────┐  │
+│  │  AdminApi    │        │  ConsumerApi          │  │
+│  │  (auth req.) │        │  (read-only, public)  │  │
+│  └──────────────┘        └──────────────────────┘  │
+└────────────────────────────────────────────────────┘
+         │                          │
+   register / publish           fetch MFE list
+         │                          │
+┌─────────────────┐       ┌──────────────────────┐
+│  Micro Frontend │       │  Shell App (port 3001)│
+│  catalog v1     │       │  Loads MFE URLs from  │
+│  catalog v2     │       │  discovery API at     │
+│  product        │       │  page load            │
+└─────────────────┘       └──────────────────────┘
+```
+
+The **AdminApi** is used by CI/CD pipelines and operators to register micro frontend versions. The **ConsumerApi** is queried by the shell app — no auth token required — and returns the list of micro frontends assigned to the requesting user based on the active deployment strategy.
+
+## Prerequisites
+
+- Node.js 16 or later
+- cURL
+- An AWS account for deploying the discovery service
+
+## Step-by-step walkthrough
+
+<Steps>
+  <Step title="Deploy the discovery service on AWS">
+    Follow the [Deployment instructions](https://github.com/module-federation/module-federation-examples/blob/master/frontend-discovery-service/USER_GUIDE.md#deploying-the-solution) to deploy the Frontend Service Discovery stack.
+
+    Set these values during deployment:
+
+    | Parameter | Value |
+    |---|---|
+    | `AccessControlAllowOrigin` | `https://localhost:3001` |
+    | `CookieSettings` | `Secure; SameSite=None` |
+
+    Record the `ConsumerApi` and `AdminApi` URLs from the deployment output. Obtain an API token by following the [Making Authenticated API Requests guide](https://github.com/module-federation/module-federation-examples/blob/master/frontend-discovery-service/docs/USER_GUIDE.md#making-authenticated-api-requests).
+  </Step>
+  <Step title="Create a project">
+    All micro frontends belong to a named project. Create one:
+
+    ```bash
+    curl -X POST $API_URL/projects \
+         -H "Authorization: Bearer $API_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"name":"my-project"}'
+    ```
+
+    Record the `projectId` from the response.
+  </Step>
+  <Step title="Register and publish the catalog micro frontend">
+    Create the micro frontend entry:
+
+    ```bash
+    curl -X POST $API_URL/projects/$PROJECT_ID/microFrontends \
+         -H "Authorization: Bearer $API_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"name":"catalog"}'
+    ```
+
+    Record the `microFrontendId`, then publish version 1.0.0:
+
+    ```bash
+    curl -X POST $API_URL/projects/$PROJECT_ID/microFrontends/$MFE_ID/versions \
+         -H "Authorization: Bearer $API_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "version": {
+             "url": "https://localhost:3003/remoteEntry.js",
+             "metadata": {
+               "integrity": "e0d123e5f316bef78bfdf5a008837577",
+               "version": "1.0.0"
+             }
+           }
+         }'
+    ```
+
+    <Note>
+      The `integrity` field is mocked in this demo. In production, provide the actual SRI hash for security verification.
+    </Note>
+  </Step>
+  <Step title="Register and publish the product micro frontend">
+    ```bash
+    curl -X POST $API_URL/projects/$PROJECT_ID/microFrontends \
+         -H "Authorization: Bearer $API_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"name":"product"}'
+    ```
+
+    Publish version 1.0.0 for the product MFE running on port 3002:
+
+    ```bash
+    curl -X POST $API_URL/projects/$PROJECT_ID/microFrontends/$MFE_ID/versions \
+         -H "Authorization: Bearer $API_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "version": {
+             "url": "https://localhost:3002/remoteEntry.js",
+             "metadata": {
+               "integrity": "e0d123e5f316bef78bfdf5a008837578",
+               "version": "1.0.0"
+             }
+           }
+         }'
+    ```
+  </Step>
+  <Step title="Verify the deployment">
+    Query the ConsumerApi to confirm both micro frontends are registered:
+
+    ```bash
+    curl $CONSUMER_API_URL/projects/$PROJECT_ID/microFrontends
+    ```
+
+    Expected response:
+
+    ```json
+    {
+      "schema": "<SCHEMA_URL>",
+      "microFrontends": {
+        "my-project/product": [
+          {
+            "url": "https://localhost:3002/remoteEntry.js",
+            "metadata": {
+              "version": "1.0.0",
+              "integrity": "e0d123e5f316bef78bfdf5a008837578"
+            }
+          }
+        ],
+        "my-project/catalog": [
+          {
+            "url": "https://localhost:3003/remoteEntry.js",
+            "metadata": {
+              "version": "1.0.0",
+              "integrity": "e0d123e5f316bef78bfdf5a008837577"
+            }
+          }
+        ]
+      }
+    }
+    ```
+  </Step>
+  <Step title="Start the shell application">
+    Install dependencies and build the app:
+
+    ```bash
+    npm install
+    npm run build
+    ```
+
+    Start with the discovery endpoint injected as an environment variable:
+
+    ```bash
+    export DISCOVERY_ENDPOINT=$CONSUMER_API_URL/projects/$PROJECT_ID/microFrontends
+    npm start
+    ```
+
+    Open [https://localhost:3001](https://localhost:3001) in your browser.
+
+    <Warning>
+      The shell and all MFEs run on HTTPS with self-signed certificates. If you see `net::ERR_CERT_AUTHORITY_INVALID`, navigate to each port directly (`https://localhost:3002`, `https://localhost:3003`, `https://localhost:3004`) and accept the certificate before testing.
+    </Warning>
+  </Step>
+</Steps>
+
+## Shell app webpack configuration
+
+The shell app uses `ExternalTemplateRemotesPlugin` to load remote scripts dynamically. It does not list any fixed remotes in the `ModuleFederationPlugin` — the remote URLs come from the discovery API at runtime.
+
+```javascript webpack.config.js (app-shell)
+const { DefinePlugin } = require('webpack');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const ExternalTemplateRemotesPlugin = require('external-remotes-plugin');
+
+module.exports = {
+  entry: './src/index',
+  output: {
+    publicPath: 'auto',
+  },
+  devServer: {
+    port: 3001,
+    https: true,
+  },
+  plugins: [
+    new DefinePlugin({
+      'process.env.DISCOVERY_ENDPOINT': JSON.stringify(process.env.DISCOVERY_ENDPOINT),
+    }),
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'AppShell',
+      shared: {
+        react: { singleton: true },
+        'react-dom': { singleton: true },
+      },
+    }),
+    new ExternalTemplateRemotesPlugin(),
+  ],
+};
+```
+
+The `App.js` fetches the discovery endpoint at startup, then loads each micro frontend's `remoteEntry.js` dynamically when the user requests it:
+
+```javascript App.js
+const ENDPOINT = process.env.DISCOVERY_ENDPOINT;
+
+const discover = async config => {
+  const res = await fetch(config.endpoint, { credentials: 'include' });
+  return res.json();
+};
+
+function loadComponent(scope, module) {
+  return async () => {
+    await __webpack_init_sharing__('default');
+    const container = window[scope];
+    await container.init(__webpack_share_scopes__.default);
+    const factory = await window[scope].get(`./${module}`);
+    return factory();
+  };
+}
+
+async function init() {
+  MFEs = await discover({ endpoint: ENDPOINT });
+}
+
+init();
+
+function App() {
+  const [system, setSystem] = React.useState(undefined);
+
+  function loadMFE(id) {
+    const mfe = MFEs.microFrontends[id][0];
+    setSystem({
+      url: mfe.url,
+      scope: `${(id + '/' + mfe.metadata.version).replace(/[\.\-\/]/gi, '_')}`,
+      module: id,
+    });
+  }
+
+  return (
+    <div>
+      {LINKS.map(link => (
+        <button onClick={() => loadMFE(link)} key={link}>
+          Load {link}
+        </button>
+      ))}
+      <System system={system} />
+    </div>
+  );
+}
+```
+
+## Blue/green deployments with gradual traffic shifting
+
+To deploy a new version of the catalog MFE without immediately exposing all users to it, publish the new version with a deployment strategy:
+
+```bash
+curl -X POST $API_URL/projects/$PROJECT_ID/microFrontends/$MFE_ID/versions \
+     -H "Authorization: Bearer $API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "version": {
+         "url": "https://localhost:3004/remoteEntry.js",
+         "metadata": {
+           "integrity": "e0d123e5f316bef78bfdf5a008837574",
+           "version": "2.0.0"
+         }
+       },
+       "deploymentStrategy": "Linear10PercentEvery1Minute"
+     }'
+```
+
+### Linear10PercentEvery1Minute
+
+This strategy shifts traffic from V1 to V2 over 10 minutes:
+
+| Minute | % of users on V2 |
+|--------|-----------------|
+| 0 | 10% |
+| 1 | 20% |
+| 2 | 30% |
+| … | … |
+| 9 | 100% |
+
+## Consumer stickiness
+
+Traffic assignment is based on a `USER_TOKEN` cookie set by the ConsumerApi. Once a user is assigned to V2, subsequent requests return V2 for that user for the remainder of the deployment and after it completes.
+
+<Info>
+  The MFE list is fetched once at page load. Refresh the page to pick up a new version assignment during an active deployment.
+</Info>
+
+To simulate multiple users during testing, delete or modify the `USER_TOKEN` cookie and reload. The next response will include a `Set-Cookie` header with a new token and a potentially different version assignment.
+
+## Production CORS configuration
+
+In production, configure the AWS deployment parameters precisely:
+
+| Parameter | Description |
+|---|---|
+| `AccessControlAllowOrigin` | The exact origin of your shell app (e.g., `https://my-shell.example.com`). Wildcards (`*`) break cookie-based stickiness. |
+| `CookieSettings` | `Secure; SameSite=None` — required for cross-origin cookies when the shell and discovery service are on different domains. |

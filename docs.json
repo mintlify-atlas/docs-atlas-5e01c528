@@ -1,122 +1,105 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Module Federation Examples",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#1c2434",
+    "light": "#77a1da",
+    "dark": "#595290"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/0118482d-e553-4600-b04e-5145ac05c207.svg",
+  "logo": {
+    "light": "https://media.brand.dev/025a12cb-dc3d-4257-84a0-e6decc4055e7.svg",
+    "dark": "https://media.brand.dev/025a12cb-dc3d-4257-84a0-e6decc4055e7.svg"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/module-federation/module-federation-examples"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/module-federation/module-federation-examples"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Getting Started",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Introduction",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "core-concepts"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Foundational Examples",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "examples/basic-host-remote",
+              "examples/bi-directional",
+              "examples/dynamic-remotes"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Build Tools",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
-            ]
-          },
-          {
-            "group": "AI tools",
-            "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "examples/webpack",
+              "examples/rspack",
+              "examples/vite"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Examples",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Framework Integrations",
             "pages": [
-              "api-reference/introduction"
+              "examples/react",
+              "examples/vue",
+              "examples/angular",
+              "examples/cross-framework"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Server-Side Rendering",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "examples/ssr-overview",
+              "examples/nextjs",
+              "examples/react-18-ssr"
+            ]
+          },
+          {
+            "group": "Advanced Patterns",
+            "pages": [
+              "examples/shared-dependencies",
+              "examples/shared-routing",
+              "examples/runtime-plugins",
+              "examples/error-handling"
+            ]
+          },
+          {
+            "group": "TypeScript",
+            "pages": [
+              "examples/typescript",
+              "examples/typescript-monorepo"
+            ]
+          },
+          {
+            "group": "Deployment & Operations",
+            "pages": [
+              "examples/deployment",
+              "examples/frontend-discovery",
+              "examples/testing"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

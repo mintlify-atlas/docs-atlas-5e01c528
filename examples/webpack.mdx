@@ -1,0 +1,347 @@
+---
+title: "Webpack 5"
+description: "Configure Module Federation with Webpack 5 using ModuleFederationPlugin"
+---
+
+Webpack 5 ships with `ModuleFederationPlugin` built in, and the `@module-federation/enhanced` package extends it with additional runtime capabilities, type-safe remotes, and the `asyncStartup` experiment.
+
+<CardGroup cols={2}>
+  <Card title="Built-in plugin" icon="box">
+    `webpack/lib/container/ModuleFederationPlugin` — available out of the box with Webpack 5, no extra dependencies required.
+  </Card>
+  <Card title="Enhanced plugin" icon="bolt">
+    `@module-federation/enhanced/webpack` — drops in as a replacement and adds async startup, better type inference, and cross-bundler compatibility.
+  </Card>
+</CardGroup>
+
+## Host app configuration
+
+The host is the application shell that loads remote modules at runtime. The example below is taken from **app-01** in the `rspack-webpack-interop` example, which acts as the Webpack host consuming four Rspack remotes.
+
+```javascript webpack.config.js (host)
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+module.exports = {
+  entry: './src/index',
+  cache: false,
+
+  mode: 'production',
+  devtool: 'source-map',
+
+  optimization: {
+    minimize: false,
+    // splitChunks must be removed when using Module Federation
+    // to avoid chunk loading conflicts with federated modules
+  },
+
+  output: {
+    // 'auto' derives the public path from the document URL at runtime,
+    // so remoteEntry.js is always resolved correctly regardless of deploy path
+    publicPath: 'auto',
+  },
+
+  resolve: {
+    extensions: ['.jsx', '.js', '.json', '.mjs'],
+  },
+
+  module: {
+    rules: [
+      {
+        // Required for interop with CommonJS modules that use .mjs extensions
+        test: /\.m?js$/,
+        type: 'javascript/auto',
+        resolve: { fullySpecified: false },
+      },
+      {
+        test: /\.jsx?$/,
+        loader: require.resolve('babel-loader'),
+        exclude: /node_modules/,
+        options: {
+          presets: [require.resolve('@babel/preset-react')],
+        },
+      },
+    ],
+  },
+
+  plugins: [
+    new ModuleFederationPlugin({
+      // Unique name for this federated application — used as the global variable name
+      name: 'app_01',
+
+      // The file that other apps import to consume modules from this app
+      filename: 'remoteEntry.js',
+
+      // Modules this app makes available to other federated apps
+      exposes: {
+        './SideNav': './src/SideNav',
+        './Page': './src/Page',
+      },
+
+      // Remote apps this host can import from — format: name@url/remoteEntry.js
+      remotes: {
+        app_02: 'app_02@http://localhost:3002/remoteEntry.js',
+        app_03: 'app_03@http://localhost:3003/remoteEntry.js',
+        app_04: 'app_04@http://localhost:3004/remoteEntry.js',
+        app_05: 'app_05@http://localhost:3005/remoteEntry.js',
+      },
+
+      // Defer module resolution until async boundaries are established,
+      // improving startup performance
+      experiments: {
+        asyncStartup: true,
+      },
+
+      // Use the already-loaded version of a shared module rather than
+      // downloading a newer version that satisfies semver
+      shareStrategy: 'loaded-first',
+
+      shared: {
+        // singleton: true ensures only one React instance is active —
+        // required to avoid hook errors when remotes and host share React
+        react: { singleton: true, eager: true },
+        'react-dom': { singleton: true, eager: true },
+        'react-router-dom': { singleton: true, eager: true },
+        '@material-ui/core': { singleton: true, eager: true },
+      },
+    }),
+    new HtmlWebpackPlugin({
+      template: './public/index.html',
+    }),
+  ],
+};
+```
+
+## Remote app configuration
+
+Remotes expose modules that the host (or other remotes) can consume. The example below is **app-02**, a bidirectional app that both exposes modules and consumes from app-01 and app-03.
+
+```javascript webpack.config.js (remote)
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const deps = require('./package.json').dependencies;
+
+module.exports = {
+  entry: './src/index',
+  cache: false,
+
+  mode: 'development',
+  devtool: 'source-map',
+
+  optimization: { minimize: false },
+
+  output: {
+    publicPath: 'auto',
+  },
+
+  resolve: {
+    extensions: ['.jsx', '.js', '.json', '.mjs'],
+  },
+
+  module: {
+    rules: [
+      {
+        test: /\.m?js$/,
+        type: 'javascript/auto',
+        resolve: { fullySpecified: false },
+      },
+      {
+        test: /\.jsx?$/,
+        loader: require.resolve('babel-loader'),
+        exclude: /node_modules/,
+        options: {
+          presets: [require.resolve('@babel/preset-react')],
+        },
+      },
+    ],
+  },
+
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'app_02',
+      filename: 'remoteEntry.js',
+
+      // This remote also consumes from other apps — bidirectional federation
+      remotes: {
+        app_01: 'app_01@http://localhost:3001/remoteEntry.js',
+        app_03: 'app_03@http://localhost:3003/remoteEntry.js',
+      },
+
+      exposes: {
+        './Dialog': './src/Dialog',
+        './Tabs': './src/Tabs',
+      },
+
+      experiments: {
+        asyncStartup: true,
+      },
+
+      shareStrategy: 'loaded-first',
+
+      shared: {
+        // Spread package.json deps to auto-share all dependencies,
+        // then override specific ones with custom options
+        ...deps,
+        react: { singleton: true },
+        'react-dom': { singleton: true },
+        'react-router-dom': { singleton: true },
+        '@material-ui/core': { singleton: true },
+      },
+    }),
+    new HtmlWebpackPlugin({
+      template: './public/index.html',
+      chunks: ['main'],
+    }),
+  ],
+};
+```
+
+## Key configuration options
+
+### Top-level plugin options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `name` | `string` | Unique identifier for this federated app. Becomes the global variable name exposed by `remoteEntry.js`. |
+| `filename` | `string` | Output filename of the remote entry manifest. Defaults to `remoteEntry.js`. |
+| `exposes` | `object` | Map of public module paths to local file paths. Keys are the names other apps import. |
+| `remotes` | `object` | Map of remote app names to their entry URLs, in `name@url` format. |
+| `shared` | `object \| array` | Dependencies to share between host and remotes to avoid duplicate instances. |
+| `shareStrategy` | `string` | `'version-first'` (default) or `'loaded-first'`. Controls which shared version wins. |
+
+### `shared` module options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `singleton` | `boolean` | `false` | Enforce a single shared instance. Required for React, Vue, and similar libraries that maintain global state. |
+| `eager` | `boolean` | `false` | Include the shared module in the initial chunk rather than lazy-loading it. Reduces async overhead at startup. |
+| `requiredVersion` | `string` | — | Semver range the shared module must satisfy. Throws a warning or error if the loaded version doesn't match. |
+| `strictVersion` | `boolean` | `false` | Throw an error (instead of a warning) when `requiredVersion` is not met. |
+
+## `@module-federation/enhanced` plugin
+
+The `@module-federation/enhanced/webpack` plugin is a drop-in replacement for Webpack's built-in plugin with these additions:
+
+<CardGroup cols={2}>
+  <Card title="asyncStartup experiment" icon="rocket">
+    Defers module initialization to async boundaries. Eliminates the manual `import('./bootstrap')` workaround previously needed to avoid eager consumption errors.
+  </Card>
+  <Card title="Cross-bundler support" icon="shuffle">
+    Federates seamlessly with Rspack apps using the same plugin family, enabling Webpack hosts to consume Rspack remotes and vice versa.
+  </Card>
+  <Card title="Type-safe remotes" icon="code">
+    Generates `@mf-types` declarations for remote modules so TypeScript can resolve federated imports with full type checking.
+  </Card>
+  <Card title="Manifest-based loading" icon="file">
+    Supports `mf-manifest.json` as an alternative to `remoteEntry.js` for richer metadata and runtime negotiation.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Replace `webpack/lib/container/ModuleFederationPlugin` with `@module-federation/enhanced/webpack` by changing only the import. The plugin accepts the same configuration shape.
+</Tip>
+
+### asyncStartup experiment
+
+Without `asyncStartup`, applications using eager shared modules require an async entry boundary — typically a separate `bootstrap.js` file dynamically imported from `index.js`. The `asyncStartup` experiment removes this requirement:
+
+```javascript webpack.config.js
+new ModuleFederationPlugin({
+  name: 'app_01',
+  experiments: {
+    asyncStartup: true,
+  },
+  // ...
+})
+```
+
+## Modern.js integration
+
+Modern.js is a full-stack React framework that configures Webpack internally. Use the `tools.webpack` hook to inject `ModuleFederationPlugin`:
+
+```javascript modern.config.js
+import appTools, { defineConfig } from '@modern-js/app-tools';
+import { ModuleFederationPlugin } from '@module-federation/enhanced/webpack';
+
+export default defineConfig({
+  server: {
+    port: 3001,
+  },
+  runtime: {
+    router: true,
+  },
+  source: {
+    // Creates an async entry boundary automatically, allowing page code
+    // to consume federated remote modules without manual bootstrap files
+    enableAsyncEntry: true,
+  },
+  tools: {
+    webpack: (config, { appendPlugins }) => {
+      // Modern.js's default splitChunks conflicts with Module Federation —
+      // delete it to avoid chunk loading errors
+      delete config.optimization.splitChunks;
+
+      // 'auto' is required so remoteEntry.js resolves correctly at runtime
+      config.output.publicPath = 'auto';
+
+      appendPlugins([
+        new ModuleFederationPlugin({
+          name: 'app1',
+          remotes: {
+            app2: 'app2@http://localhost:3002/static/js/remoteEntry.js',
+          },
+          shared: {
+            react: { singleton: true },
+            'react-dom': { singleton: true },
+          },
+        }),
+      ]);
+    },
+  },
+  plugins: [appTools()],
+});
+```
+
+## Common pitfalls
+
+<AccordionGroup>
+  <Accordion title="Eager consumption error at startup">
+    Webpack throws `Shared module is not available for eager consumption` when a shared module is marked `eager: true` but the app has a synchronous entry point.
+
+    **Fix:** Enable the `asyncStartup` experiment, or create a `src/bootstrap.js` that re-exports your app entry and dynamically import it from `src/index.js`:
+
+    ```javascript src/index.js
+    import('./bootstrap');
+    ```
+  </Accordion>
+
+  <Accordion title="splitChunks conflicts with federated chunks">
+    Webpack's default `splitChunks` optimization can split federated module chunks in ways that break remote loading, especially in frameworks like Modern.js that configure `splitChunks` automatically.
+
+    **Fix:** Remove `splitChunks` from the optimization config when using Module Federation:
+
+    ```javascript webpack.config.js
+    optimization: {
+      splitChunks: false, // or delete config.optimization.splitChunks in Modern.js
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="publicPath must be set">
+    Without a `publicPath`, Webpack cannot construct absolute URLs for chunk requests from remotes. This causes 404 errors when the host tries to load chunks from a remote.
+
+    **Fix:** Set `publicPath: 'auto'` to derive the path from the document URL at runtime, or set it to the explicit base URL of the deployment.
+  </Accordion>
+
+  <Accordion title="Multiple React instances causing hook errors">
+    If the host and a remote each bundle their own React, hooks like `useState` and `useContext` break because they use module-level state that is not shared.
+
+    **Fix:** Add `react` and `react-dom` to `shared` with `singleton: true` in every app that participates in federation.
+  </Accordion>
+
+  <Accordion title="Module not found when consuming a remote">
+    The remote entry URL must be reachable from the host's browser context at runtime. Build-time errors indicate the remote key was not declared in `remotes`.
+
+    **Fix:** Ensure the remote name in the `remotes` map matches the `name` field in the remote app's plugin config, and that the remote server is running before the host tries to load it.
+  </Accordion>
+</AccordionGroup>

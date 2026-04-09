@@ -1,0 +1,411 @@
+---
+title: "Cross-Framework Federation"
+description: "Share modules across React, Vue, Svelte, and other frameworks in a single federated system"
+---
+
+Module Federation is not limited to a single framework. Because remoteEntry files are framework-agnostic JavaScript, any app can consume any other app's exposed modules — as long as each side handles mounting and lifecycle management for its own framework.
+
+<CardGroup cols={2}>
+  <Card title="React in Vue" icon="shuffle" href="https://github.com/module-federation/module-federation-examples/tree/master/react-in-vue">
+    A Vue host dynamically loads and mounts a React component from a federated remote.
+  </Card>
+  <Card title="Shared store cross-framework" icon="database" href="https://github.com/module-federation/module-federation-examples/tree/master/shared-store-cross-framework">
+    React and Vue components share a single Effector store via a dedicated store remote.
+  </Card>
+  <Card title="Rspack + Webpack interop" icon="arrows-left-right" href="https://github.com/module-federation/module-federation-examples/tree/master/rspack-webpack-interop">
+    Federate between Rspack and Webpack builds, mixing React, Svelte, and LitElement.
+  </Card>
+</CardGroup>
+
+---
+
+## React in Vue — full walkthrough
+
+The `react-in-vue` example is a proof-of-concept that demonstrates bidirectional communication between frameworks. The Vue host controls state (button text, visibility) and passes it as props to a React component it fetches from a federated remote. React's lifecycle hooks (`mounted`, `unmounted`) fire correctly when the Vue parent mounts or unmounts the wrapper.
+
+| App | Framework | Role | Port |
+|-----|-----------|------|------|
+| `home` | React | Remote — exposes `Button` | 3002 |
+| `layout` | Vue | Host — consumes and mounts React `Button` | 3001 |
+
+### home — React remote
+
+The React `Button` component is a standard functional component. It accepts `text` and `onClick` props and logs lifecycle events.
+
+```javascript home/src/Button.js
+import React, { useEffect, useCallback } from 'react';
+
+export default ({ text = 'Home Button', onClick }) => {
+  const onClickHandler = useCallback(() => {
+    console.log(`Button.js: "${text}" clicked!`);
+    onClick?.();
+  }, [text, onClick]);
+
+  useEffect(() => {
+    console.log('Button.js: mounted.');
+    return () => console.log('Button.js: unmounted.');
+  }, []);
+
+  return <button onClick={onClickHandler}>{text}</button>;
+};
+```
+
+The home app's webpack config exposes `Button` and marks `react` and `react-dom` as singletons so they are shared with the Vue host:
+
+```javascript home/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const deps = require('./package.json').dependencies;
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  devServer: {
+    headers: { 'Access-Control-Allow-Origin': '*' },
+    port: 3002,
+  },
+  output: { publicPath: 'auto' },
+  module: {
+    rules: [
+      {
+        test: /\.jsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react'] },
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'home',
+      filename: 'remoteEntry.js',
+      exposes: {
+        './Button': './src/Button',
+      },
+      shared: {
+        ...deps,
+        react: { singleton: true, requiredVersion: deps.react },
+        'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+      },
+    }),
+  ],
+};
+```
+
+### layout — Vue host
+
+The Vue host webpack config includes both `vue-loader` and Babel with `@babel/preset-react` so it can process `.jsx` files alongside `.vue` files. It declares `home` as a remote and shares both React and Vue as singletons.
+
+```javascript layout/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const deps = require('./package.json').dependencies;
+
+module.exports = (env = {}) => ({
+  mode: 'development',
+  entry: path.resolve(__dirname, './src/bootstrap.js'),
+  output: { publicPath: 'auto' },
+  resolve: {
+    extensions: ['.vue', '.jsx', '.js', '.json'],
+    alias: { vue: 'vue/dist/vue.esm-bundler.js' },
+  },
+  experiments: { topLevelAwait: true },
+  module: {
+    rules: [
+      {
+        test: /\.jsx?$/,
+        loader: 'babel-loader',
+        exclude: /node_modules/,
+        options: { presets: ['@babel/preset-react'] },
+      },
+      { test: /\.vue$/, use: 'vue-loader' },
+      {
+        test: /\.css$/,
+        use: [{ loader: MiniCssExtractPlugin.loader }, 'css-loader'],
+      },
+    ],
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'layout',
+      remotes: {
+        home: 'home@http://localhost:3002/remoteEntry.js',
+      },
+      shared: {
+        ...deps,
+        react: { singleton: true, requiredVersion: deps.react },
+        'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+      },
+    }),
+    new VueLoaderPlugin(),
+  ],
+  devServer: { port: 3001 },
+});
+```
+
+### Mounting a React component inside Vue
+
+The key is a Vue composition component (`ReactButton`) that uses `ReactDOM.render` to mount the remote React component into a plain DOM node and cleans up with `ReactDOM.unmountComponentAtNode` when the Vue parent unmounts.
+
+```javascript layout/src/ReactButton.js
+import { ref, onMounted, onBeforeUnmount, onUpdated } from 'vue';
+import ReactDOM from 'react-dom';
+import React from 'react';
+
+const firstLoad = new Promise(resolve => setTimeout(resolve, 1000));
+
+async function fetchButton() {
+  await firstLoad; // simulate network latency
+  return (await import('home/Button')).default;
+}
+
+export default {
+  name: 'ReactButton',
+  props: {
+    text: String,
+    onClick: Function,
+  },
+  setup(props) {
+    const root = ref(null);
+    const error = ref(null);
+    const ButtonComponent = ref(null);
+
+    function updateReactComponent() {
+      if (!ButtonComponent.value || !!error.value) return;
+      ReactDOM.render(React.createElement(ButtonComponent.value, props), root.value);
+    }
+
+    function unmountReactComponent() {
+      root.value && ReactDOM.unmountComponentAtNode(root.value);
+    }
+
+    onMounted(updateReactComponent);
+    onUpdated(updateReactComponent);
+    onBeforeUnmount(unmountReactComponent);
+
+    fetchButton()
+      .then(b => {
+        ButtonComponent.value = b;
+        updateReactComponent();
+      })
+      .catch(e => { error.value = e; });
+
+    return { root, error };
+  },
+  template: `
+    <div v-if="error">error loading button</div>
+    <div v-else ref="root">loading button...</div>
+  `,
+};
+```
+
+### Communication between Vue and React
+
+Vue state is passed into React as props via `React.createElement`. The Vue host also passes an `onClick` callback, so React events bubble back into Vue state. When the Vue parent toggles `showButton`, `onBeforeUnmount` fires and `ReactDOM.unmountComponentAtNode` calls the React component's cleanup effect.
+
+```javascript layout/src/Layout.js
+import { ref } from 'vue';
+import ReactButton from './ReactButton';
+
+export default {
+  name: 'Layout',
+  components: { ReactButton },
+  setup() {
+    const showButton = ref(true);
+    const buttonText = ref('React button');
+    const clickedCount = ref(0);
+    const incrementCount = () => (clickedCount.value += 1);
+
+    return { showButton, buttonText, clickedCount, incrementCount };
+  },
+  template: `
+    <div class="layout-app">
+      <div>
+        <h2>Vue State/Input</h2>
+        <label>
+          <span>Show button:</span>
+          <input v-model="showButton" type="checkbox" />
+        </label>
+        <label>
+          <span>Button text:</span>
+          <input v-model="buttonText" type="text" />
+        </label>
+        <label>
+          <span>Times button clicked: </span>
+          <input disabled type="number" :value="clickedCount" />
+        </label>
+      </div>
+      <div>
+        <h2>React Button - loaded via Module Federation</h2>
+        <react-button v-if="showButton" :text="buttonText" :onClick="incrementCount" />
+      </div>
+    </div>
+  `,
+};
+```
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Start both apps">
+    ```bash
+    pnpm run start
+    ```
+  </Step>
+  <Step title="Open the Vue host">
+    Visit `http://localhost:3001`. The React button is fetched from `localhost:3002` and rendered inside the Vue template.
+  </Step>
+  <Step title="Interact">
+    Edit the text input to change the React button label. Toggle the checkbox to mount/unmount the React component — watch the browser console for React lifecycle log messages.
+  </Step>
+</Steps>
+
+---
+
+## Shared state across frameworks
+
+The `shared-store-cross-framework` example uses [Effector](https://effector.dev/), a framework-agnostic state library, to share a counter between a React shell, a React counter remote, and a Vue counter remote.
+
+| App | Framework | Port |
+|-----|-----------|------|
+| `shell` | React | 3001 |
+| `react-counter` | React | 3002 |
+| `shared-store` | Framework-agnostic | 3003 |
+| `vue-counter` | Vue 3 | 3004 |
+
+### shared-store — framework-agnostic state remote
+
+The store remote exposes a single Effector store. It is consumed by both the React and Vue counter remotes, which bind to it using their respective Effector integrations (`effector-react` / `effector-vue`).
+
+```javascript shared-store/webpack.config.js
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+
+module.exports = {
+  entry: './src/index',
+  mode: 'development',
+  output: { publicPath: 'auto' },
+  devServer: { port: 3003 },
+  plugins: [
+    new ModuleFederationPlugin({
+      experiments: { asyncStartup: true },
+      name: 'store',
+      filename: 'remoteEntry.js',
+      library: { type: 'global', name: 'store' },
+      exposes: {
+        './Counter': './src/counter',
+      },
+      shared: {
+        effector: { singleton: true },
+        'effector-react': { singleton: true },
+      },
+    }),
+  ],
+};
+```
+
+```javascript shared-store/src/counter.js
+import { createStore } from 'effector';
+
+const $counter = createStore(0);
+
+export default $counter;
+```
+
+### shell — React host consuming React and Vue counter remotes
+
+The shell declares all three remotes and shares `react`, `vue`, `effector`, and their framework bindings as singletons:
+
+```javascript shell/webpack.config.js
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'app1',
+  remotes: {
+    react_counter: `react_counter@//localhost:3002/remoteEntry.js`,
+    store: `store@//localhost:3003/remoteEntry.js`,
+    vue_counter: `vue_counter@//localhost:3004/remoteEntry.js`,
+  },
+  shared: {
+    react: { singleton: true },
+    'react-dom': { singleton: true },
+    vue: { singleton: true, requiredVersion: package.dependencies.vue },
+    effector: { singleton: true },
+    'effector-react': { singleton: true },
+    'effector-vue': { singleton: true },
+    'styled-components': { singleton: true },
+  },
+}),
+```
+
+### react-counter — React remote consuming the store
+
+```javascript react-counter/webpack.config.js
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'react_counter',
+  filename: 'remoteEntry.js',
+  remotes: {
+    store: 'store@http://localhost:3003/remoteEntry.js',
+  },
+  exposes: {
+    './ReactCounter': './src/ReactCounter',
+  },
+  shared: {
+    react: { singleton: true },
+    'react-dom': { singleton: true },
+    effector: { singleton: true },
+    'effector-react': { singleton: true },
+    'styled-components': { singleton: true },
+  },
+}),
+```
+
+### vue-counter — Vue 3 remote consuming the store
+
+```javascript vue-counter/webpack.config.js
+new ModuleFederationPlugin({
+  experiments: { asyncStartup: true },
+  name: 'vue_counter',
+  filename: 'remoteEntry.js',
+  remotes: {
+    store: 'store@http://localhost:3003/remoteEntry.js',
+  },
+  exposes: {
+    './VueCounter': './src/bootstrap',
+  },
+  shared: {
+    vue: { singleton: true },
+    effector: { singleton: true },
+    'effector-vue': { singleton: true },
+    'styled-components': { singleton: true },
+  },
+}),
+```
+
+<Info>
+  The counter state in `shared-store` is a single Effector store instance. Because `effector` is marked `singleton: true` in every app, all three apps (React shell, React counter, Vue counter) observe and mutate the same store. Incrementing from the Vue counter is immediately reflected in the React shell, and vice versa.
+</Info>
+
+---
+
+## Key considerations
+
+<AccordionGroup>
+  <Accordion title="Each framework still requires its own singleton">
+    Even in a cross-framework setup, every framework that appears in the federation graph must be declared as a singleton. React and Vue each maintain global state (hook registries, reactivity systems, plugin instances) that breaks if a second copy loads. Mark `react`, `react-dom`, and `vue` as `singleton: true` in every app that shares them.
+  </Accordion>
+  <Accordion title="Manual lifecycle management">
+    When mounting a React component inside Vue (or vice versa), you are responsible for calling the target framework's mount and unmount APIs. In the `react-in-vue` example this is `ReactDOM.render` on mount and `ReactDOM.unmountComponentAtNode` on `onBeforeUnmount`. Forgetting to unmount causes memory leaks.
+  </Accordion>
+  <Accordion title="Passing props across frameworks">
+    Props passed from Vue into a React component go through `React.createElement`. Only plain JavaScript values (strings, numbers, booleans, plain objects, functions) can cross the boundary — Vue reactivity objects, Vue refs, and Vue component instances cannot be passed as React props.
+  </Accordion>
+  <Accordion title="CSS isolation">
+    When two frameworks render into the same page their component styles can collide. Use CSS Modules, scoped styles, or a CSS-in-JS solution for each remote, and test for visual regressions when combining unrelated design systems.
+  </Accordion>
+  <Accordion title="Framework-agnostic state is the cleanest bridge">
+    Using a framework-agnostic state library (Effector, Zustand, Jotai, or a plain observable) as the shared-store remote avoids the need to bridge reactive systems. Each framework binds to the store using its own integration library, keeping the state logic independent of the UI layer.
+  </Accordion>
+</AccordionGroup>

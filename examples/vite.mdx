@@ -1,0 +1,338 @@
+---
+title: "Vite"
+description: "Module Federation with Vite using native federation and vite-plugin-federation"
+---
+
+Vite's native ESM output makes it a natural fit for Module Federation. The `@module-federation/vite` plugin brings the same federation primitives — `exposes`, `remotes`, `shared` — to Vite's build pipeline, producing native ES module bundles instead of UMD or CommonJS chunks.
+
+<CardGroup cols={2}>
+  <Card title="Native ESM" icon="bolt">
+    Federated modules are loaded as ES modules using `<script type="module">`. No global variable hacks or JSONP chunk loading required.
+  </Card>
+  <Card title="Framework agnostic" icon="puzzle">
+    The same `@module-federation/vite` plugin works with React, Vue 3, Svelte, Solid, and any other Vite-compatible framework.
+  </Card>
+  <Card title="Build target chrome89" icon="chrome">
+    Dynamic `import()` and top-level `await` are the transport mechanism, so a modern browser target is required. `target: 'chrome89'` covers all browsers that support dynamic imports natively.
+  </Card>
+  <Card title="remoteEntry.js" icon="file">
+    Unlike Webpack's UMD container, the Vite remote entry is itself an ES module. It uses `type: 'module'` in the host remote declaration.
+  </Card>
+</CardGroup>
+
+## Installation
+
+```bash
+npm install @module-federation/vite --save-dev
+```
+
+## React host and remote
+
+The `module-federation-vite-react` example is the canonical starting point. It has two apps: a host on port 4173 and a remote on port 4174.
+
+### Host configuration
+
+```typescript vite.config.ts (host)
+import { federation } from '@module-federation/vite';
+import react from '@vitejs/plugin-react';
+import { defineConfig } from 'vite';
+import { dependencies } from './package.json';
+
+export default defineConfig(() => ({
+  server: {
+    // Allow Vite dev server to serve files from the shared directory
+    fs: { allow: ['.', '../shared'] },
+  },
+  build: {
+    // Dynamic import() for federation requires a modern browser target
+    target: 'chrome89',
+  },
+  plugins: [
+    federation({
+      name: 'host',
+
+      remotes: {
+        remote: {
+          // 'module' type tells the plugin to load via native ES module import,
+          // not via a legacy UMD global variable
+          type: 'module',
+          name: 'remote',
+          entry: 'http://localhost:4174/remoteEntry.js',
+          entryGlobalName: 'remote',
+          shareScope: 'default',
+        },
+      },
+
+      // The host declares no exposes — it only consumes
+      exposes: {},
+
+      filename: 'remoteEntry.js',
+
+      shared: {
+        react: {
+          // Use the exact version declared in this package.json
+          requiredVersion: dependencies.react,
+          singleton: true,
+        },
+      },
+    }),
+    react(),
+  ],
+}));
+```
+
+### Remote configuration
+
+```typescript vite.config.ts (remote)
+import { federation } from '@module-federation/vite';
+import react from '@vitejs/plugin-react';
+import { writeFileSync } from 'fs';
+import { defineConfig, loadEnv } from 'vite';
+import { dependencies } from './package.json';
+
+export default defineConfig(({ mode }) => {
+  const selfEnv = loadEnv(mode, process.cwd());
+
+  return {
+    server: {
+      fs: { allow: ['.', '../shared'] },
+    },
+    build: {
+      target: 'chrome89',
+    },
+    plugins: [
+      {
+        // Generate a typed environment file at build time so federated
+        // modules can read env vars without bundling them into the host
+        name: 'generate-environment',
+        options: function () {
+          writeFileSync(
+            './src/environment.ts',
+            `export default ${JSON.stringify(selfEnv, null, 2)};`,
+          );
+        },
+      },
+      federation({
+        filename: 'remoteEntry.js',
+        name: 'remote',
+
+        exposes: {
+          // The key './remote-app' is what the host imports as 'remote/remote-app'
+          './remote-app': './src/App.tsx',
+        },
+
+        remotes: {},
+
+        shared: {
+          react: {
+            requiredVersion: dependencies.react,
+            singleton: true,
+          },
+        },
+      }),
+      react(),
+    ],
+  };
+});
+```
+
+### Consuming the remote in the host
+
+The host imports the remote app using React's `lazy` and `Suspense`:
+
+```typescript host/src/App.tsx
+import { lazy, Suspense } from 'react';
+
+// 'remote/remote-app' maps to the remote's exposes['./remote-app'] entry
+const Remote = lazy(
+  async () => import('remote/remote-app'),
+);
+
+export default () => (
+  <>
+    <div className="host">I'm the host app</div>
+    <Suspense fallback="loading...">
+      <Remote />
+    </Suspense>
+  </>
+);
+```
+
+## Framework variants
+
+The same plugin and pattern work across frameworks. Only the framework-specific Vite plugin changes.
+
+<Tabs>
+  <Tab title="Vue 3">
+    ```typescript vite.config.ts (Vue 3 host)
+    import { federation } from '@module-federation/vite';
+    import vue from '@vitejs/plugin-vue';
+    import vueJsx from '@vitejs/plugin-vue-jsx';
+    import { defineConfig } from 'vite';
+
+    export default defineConfig(async () => ({
+      build: { target: 'chrome89' },
+      plugins: [
+        federation({
+          name: 'host',
+          remotes: {
+            remote: {
+              type: 'module',
+              name: 'remote',
+              entry: 'http://localhost:4174/remoteEntry.js',
+              entryGlobalName: 'remote',
+              shareScope: 'default',
+            },
+          },
+          exposes: {},
+          filename: 'remoteEntry.js',
+        }),
+        vue(),
+        vueJsx(),
+      ],
+    }));
+    ```
+
+    The Vue 3 remote exposes a `.vue` single-file component:
+
+    ```typescript vite.config.ts (Vue 3 remote)
+    federation({
+      filename: 'remoteEntry.js',
+      name: 'remote',
+      exposes: {
+        './remote-app': './src/App.vue',
+      },
+      remotes: {},
+    })
+    ```
+
+    The Vue 3 example also demonstrates **shared Pinia state** between host and remote — the state store is shared as a singleton dependency.
+  </Tab>
+  <Tab title="Svelte">
+    ```typescript vite.config.ts (Svelte host)
+    import { federation } from '@module-federation/vite';
+    import { svelte } from '@sveltejs/vite-plugin-svelte';
+    import { defineConfig } from 'vite';
+
+    export default defineConfig({
+      plugins: [
+        svelte(),
+        federation({
+          name: 'host',
+          remotes: {
+            remote: {
+              type: 'module',
+              name: 'remote',
+              entry: 'http://localhost:4174/remoteEntry.js',
+              entryGlobalName: 'remote',
+              shareScope: 'default',
+            },
+          },
+          exposes: {},
+          filename: 'remoteEntry.js',
+        }),
+      ],
+      build: { target: 'chrome89' },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Running the React example
+
+<Steps>
+  <Step title="Install dependencies">
+    From the example directory, install both the host and remote packages:
+
+    ```bash
+    npm run install:deps
+    ```
+
+    This runs `pnpm --filter module-federation-vite-react-* install` followed by a build of all packages.
+  </Step>
+  <Step title="Build and preview">
+    ```bash
+    npm run preview
+    ```
+
+    This builds both apps and starts Vite's preview server. The host is available at http://localhost:4173 and the remote at http://localhost:4174.
+  </Step>
+  <Step title="Development mode (optional)">
+    For development with HMR, run each app's dev server separately:
+
+    ```bash
+    # In host/
+    npm run dev   # port 4173
+
+    # In remote/
+    npm run dev   # port 4174
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Run the remote's build before starting the host in preview mode. The remote's `remoteEntry.js` must exist on disk before the host can load it. `npm run install:deps` handles this automatically via the `postinstall:deps` hook.
+</Note>
+
+### Port reference
+
+| App | Dev port | Preview port |
+|-----|----------|--------------|
+| React host | 4173 | 4173 |
+| React remote | 4174 | 4174 |
+| Vue 3 host | 4173 | 4173 (5173 in some configs) |
+| Svelte host | 4173 | 4173 |
+
+## Differences from Webpack federation
+
+| Concern | Webpack | Vite |
+|---------|---------|------|
+| Module format | UMD / CommonJS | Native ESM |
+| Remote entry loading | JSONP / `<script>` tag | `import()` / `<script type="module">` |
+| Remote declaration | `name@url/remoteEntry.js` string | Object with `type: 'module'` |
+| Browser support | IE11+ (with polyfills) | Chrome 89+, Safari 15+, Firefox 89+ |
+| SSR support | Full | Limited — check `@module-federation/vite` release notes |
+| `eager` shared modules | Supported | Not applicable — ESM is always async |
+| HMR in dev mode | Yes | Yes |
+| Build target | Any | Must set `target: 'chrome89'` or newer |
+| Async entry boundary | Required without `asyncStartup` | Not required — ESM `import()` is always async |
+
+<Warning>
+  Vite's Module Federation implementation requires `build.target: 'chrome89'` or higher. Do not set a lower target (such as `'es2015'`) — dynamic imports and top-level `await` will not transpile correctly and federation will silently fail.
+</Warning>
+
+## Limitations and when to use Webpack vs Vite
+
+<AccordionGroup>
+  <Accordion title="Browser compatibility requirements">
+    Webpack federation with `@babel/preset-env` or `SWC` can target older browsers down to ES5. Vite federation requires browsers that support dynamic `import()` natively.
+
+    **Use Webpack** when you must support legacy browsers or IE11.
+    **Use Vite** when you can target Chrome 89+ and want faster dev builds.
+  </Accordion>
+
+  <Accordion title="Server-side rendering">
+    Webpack Module Federation has mature SSR support. Vite's ESM federation is primarily a client-side mechanism.
+
+    **Use Webpack** (or Rspack) for SSR micro-frontends.
+  </Accordion>
+
+  <Accordion title="Cross-bundler federation">
+    A Webpack host cannot consume a Vite remote and vice versa without adapter layers, because Webpack produces UMD containers and Vite produces ESM containers.
+
+    **Use Webpack + Rspack** when you need cross-bundler federation with `@module-federation/enhanced`.
+    **Use Vite** when all apps in the system are built with Vite.
+  </Accordion>
+
+  <Accordion title="Large dependency graphs">
+    Vite's dev server uses unbundled native ESM, which can cause waterfall requests for large dependency trees. `build + preview` avoids this, but pure dev mode may feel slower for apps with many shared modules.
+
+    **Use preview mode** (`npm run preview`) rather than dev mode when testing federation behavior end-to-end.
+  </Accordion>
+
+  <Accordion title="TypeScript remote types">
+    `@module-federation/enhanced` generates `@mf-types` declarations for TypeScript consumers. The Vite plugin does not currently generate these automatically.
+
+    Manually declare remote module types in a `.d.ts` file to get editor completion for federated imports.
+  </Accordion>
+</AccordionGroup>

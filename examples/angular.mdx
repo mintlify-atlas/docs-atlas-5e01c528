@@ -1,0 +1,343 @@
+---
+title: "Angular"
+description: "Module Federation with Angular using the Angular Universal SSR and native federation approaches"
+---
+
+Angular's strong conventions around NgModules and dependency injection make it a reliable target for Module Federation. These examples cover server-side rendering with Angular Universal and a Vite-native federation approach using standalone components.
+
+<CardGroup cols={2}>
+  <Card title="Angular Universal SSR" icon="server" href="https://github.com/module-federation/module-federation-examples/tree/master/angular-universal-ssr">
+    Federate Angular modules across a host and client app with full server-side rendering.
+  </Card>
+  <Card title="Module Federation + Vite + Angular" icon="bolt" href="https://github.com/module-federation/module-federation-examples/tree/master/module-federation-vite-angular">
+    Use @module-federation/vite with @analogjs/vite-plugin-angular for standalone components.
+  </Card>
+</CardGroup>
+
+---
+
+## Angular Universal SSR
+
+The `angular-universal-ssr` example federates two Angular apps with Universal (SSR) enabled. Each app produces two webpack bundles — one for the browser and one for the Node.js server.
+
+| App | Role | Port |
+|-----|------|------|
+| `client-app` | Remote — exposes a component and an NgModule | 3000 (browser) / SSR |
+| `host-app` | Host — consumes the client-app module at build time and at SSR | 3000 (host) / 5000 |
+
+### client-app — browser bundle
+
+The browser webpack config exposes both a standalone component and a full NgModule, making them available to the host via federation.
+
+```javascript client-app/webpack/client-app.js
+const ModuleFederationPlugin = require('webpack').container.ModuleFederationPlugin;
+
+module.exports = (env = {}) => ({
+  entry: ['./src/polyfills.ts', './src/main.ts'],
+  mode: 'production',
+  resolve: {
+    mainFields: ['browser', 'module', 'main'],
+    extensions: ['.ts', '.js'],
+  },
+  output: {
+    publicPath: 'http://localhost:3000/',
+  },
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'clientApp',
+      filename: 'remoteEntry.js',
+      library: { type: 'var', name: 'clientApp' },
+      exposes: {
+        './Component': './src/app/client-cities/client-city/client-city.component.ts',
+        './Module': './src/app/client-cities/client-cities.module.ts',
+      },
+      shared: [
+        { '@angular/core': { singleton: true, eager: true } },
+        { '@angular/common': { singleton: true, eager: true } },
+        { '@angular/router': { singleton: true, eager: true } },
+      ],
+    }),
+    new AngularWebpackPlugin({
+      tsConfigPath: './tsconfig.app.json',
+      entryModule: './src/app/app.module#AppModule',
+      jitMode: true,
+    }),
+  ],
+  devServer: { port: 3000 },
+});
+```
+
+### client-app — SSR bundle
+
+The server-side bundle uses `commonjs2` as the library type and `async-node` as the build target. Shared Angular packages remain `singleton` and `eager` to avoid double-instantiation during server rendering.
+
+```javascript client-app/webpack/client-ssr.js
+module.exports = (env = {}) => ({
+  entry: ['./src/main.ts'],
+  mode: 'production',
+  output: {
+    filename: '[name].js',
+    libraryTarget: 'commonjs2',
+  },
+  target: 'async-node',
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'clientApp',
+      filename: 'remoteEntry.js',
+      library: { type: 'commonjs2' },
+      exposes: {
+        './Component': './src/app/client-cities/client-city/client-city.component.ts',
+        './Module': './src/app/client-cities/client-cities.module.ts',
+      },
+      shared: [
+        { '@angular/core': { singleton: true, eager: true } },
+        { '@angular/common': { singleton: true, eager: true } },
+        { '@angular/router': { singleton: true, eager: true } },
+      ],
+    }),
+    new AngularWebpackPlugin({
+      entryModule: './src/app/app.module#AppModule',
+      tsConfigPath: './tsconfig.app.json',
+      platform: 1,
+      jitMode: true,
+    }),
+  ],
+});
+```
+
+### host-app — browser bundle
+
+The host consumes `clientApp` by variable name. Because it is a browser build, the remote reference is a runtime string; webpack resolves it from the global scope.
+
+```javascript host-app/webpack/host-app.js
+module.exports = (env = {}) => ({
+  entry: ['./src/polyfills.ts', './src/main.ts'],
+  mode: 'production',
+  plugins: [
+    new ModuleFederationPlugin({
+      library: { type: 'var' },
+      remotes: {
+        clientApp: 'clientApp',
+      },
+      shared: [
+        { '@angular/core': { singleton: true, eager: true } },
+        { '@angular/common': { singleton: true, eager: true } },
+        { '@angular/router': { singleton: true, eager: true } },
+      ],
+    }),
+    new AngularWebpackPlugin({
+      tsConfigPath: './tsconfig.app.json',
+      entryModule: './src/app/app.module#AppModule',
+      jitMode: true,
+    }),
+  ],
+});
+```
+
+### host-app — SSR bundle
+
+For the server render the host resolves the client-app remote using a local file path to the pre-built SSR remoteEntry, avoiding any network call during rendering.
+
+```javascript host-app/webpack/host-ssr.js
+module.exports = (env = {}) => ({
+  entry: ['./server.js'],
+  mode: 'production',
+  output: {
+    filename: '[name].js',
+    libraryTarget: 'commonjs2',
+  },
+  target: 'async-node',
+  plugins: [
+    new ModuleFederationPlugin({
+      name: 'hostApp',
+      filename: 'remoteEntry.js',
+      library: { type: 'commonjs2' },
+      remotes: {
+        clientApp: resolve(__dirname, '../../client-app/dist/server/remoteEntry.js'),
+      },
+      shared: [
+        { '@angular/core': { singleton: true, eager: true } },
+        { '@angular/common': { singleton: true, eager: true } },
+        { '@angular/router': { singleton: true, eager: true } },
+      ],
+    }),
+    new AngularWebpackPlugin({
+      entryModule: resolve(__dirname, '../src/app/app.server.module#AppServerModule'),
+      tsConfigPath: './tsconfig.server.json',
+      platform: 1,
+      jitMode: true,
+    }),
+  ],
+});
+```
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+  </Step>
+  <Step title="Build and start">
+    ```bash
+    pnpm run start
+    ```
+    This builds both apps (browser + SSR bundles) and starts the servers.
+  </Step>
+  <Step title="Open the apps">
+    - `client-app`: `http://localhost:4000`
+    - `host-app`: `http://localhost:3000`
+  </Step>
+</Steps>
+
+<Warning>
+  The SSR remote reference in `host-ssr.js` is a local file path. Build `client-app` before `host-app` in CI, or the path will not exist and the build will fail.
+</Warning>
+
+---
+
+## Module Federation + Vite + Angular
+
+The `module-federation-vite-angular` example uses `@module-federation/vite` with `@analogjs/vite-plugin-angular` to federate standalone Angular components without a custom webpack config.
+
+### remote — exposes AppComponent
+
+```typescript remote/vite.config.ts
+import angular from '@analogjs/vite-plugin-angular';
+import { federation } from '@module-federation/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig(({ mode }) => ({
+  build: { target: 'chrome89' },
+  resolve: { mainFields: ['module'] },
+  plugins: [
+    federation({
+      filename: 'remoteEntry.js',
+      name: 'remote',
+      exposes: {
+        './remote-app': './src/app.component.ts',
+      },
+      remotes: {},
+      shared: ['@angular/core'],
+    }),
+    angular(),
+  ],
+}));
+```
+
+```typescript remote/src/app.component.ts
+import { CommonModule } from '@angular/common';
+import { Component } from '@angular/core';
+import { CounterComponent } from './counter.component';
+
+@Component({
+  selector: 'app-remote-root',
+  standalone: true,
+  template: `
+    <div>
+      <div>I'm the remote app</div>
+      <app-remote-counter />
+    </div>
+  `,
+  imports: [CommonModule, CounterComponent],
+})
+export class AppComponent {}
+```
+
+### host — dynamically loads remote component
+
+```typescript host/vite.config.ts
+import angular from '@analogjs/vite-plugin-angular';
+import { federation } from '@module-federation/vite';
+import { defineConfig } from 'vite';
+
+export default defineConfig(({ mode }) => ({
+  build: { target: 'chrome89' },
+  resolve: { mainFields: ['module'] },
+  plugins: [
+    federation({
+      name: 'host',
+      remotes: {
+        remote: {
+          type: 'module',
+          name: 'remote',
+          entry: 'http://localhost:5174/remoteEntry.js',
+          entryGlobalName: 'remote',
+          shareScope: 'default',
+        },
+      },
+      exposes: {},
+      filename: 'remoteEntry.js',
+      shared: ['@angular/core'],
+    }),
+    angular(),
+  ],
+}));
+```
+
+The host uses Angular's `ViewContainerRef` inside an `effect()` to dynamically load and mount the remote component:
+
+```typescript host/src/app.component.ts
+import { CommonModule } from '@angular/common';
+import { Component, effect, viewChild, ViewContainerRef } from '@angular/core';
+import { CounterComponent } from './counter.component';
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  template: `
+    <div class="host">
+      <div class="card">
+        <div class="title">I'm the host app</div>
+        <app-counter />
+      </div>
+    </div>
+    <div #remote_app></div>
+  `,
+  imports: [CommonModule, CounterComponent],
+})
+export class AppComponent {
+  viewContainer = viewChild('remote_app', { read: ViewContainerRef });
+
+  constructor() {
+    effect(async () => {
+      const m = await import('remote/remote-app');
+      this.viewContainer()?.createComponent(m.AppComponent);
+    });
+  }
+}
+```
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    npm run install:deps
+    ```
+  </Step>
+  <Step title="Start preview">
+    ```bash
+    npm run preview
+    ```
+  </Step>
+  <Step title="Open the host">
+    Visit `http://localhost:5173`. The remote Angular component is loaded and rendered inside the host.
+  </Step>
+</Steps>
+
+---
+
+## Key considerations
+
+<AccordionGroup>
+  <Accordion title="Angular packages must be eager singletons">
+    `@angular/core`, `@angular/common`, and `@angular/router` must be `singleton: true` and `eager: true`. Angular's dependency injection container is global; a second copy creates a separate injector tree, breaking services, routing, and change detection.
+  </Accordion>
+  <Accordion title="NgModule vs standalone components">
+    The Universal SSR example uses JIT-compiled NgModules (`jitMode: true`). The Vite + Angular example uses standalone components, which do not require a module declaration. Standalone components are simpler to federate because you expose the component class directly.
+  </Accordion>
+  <Accordion title="SSR remote resolution">
+    During server-side rendering the `remoteEntry.js` cannot be fetched over HTTP (no browser). The host-ssr bundle resolves the remote using a local file path to the pre-built SSR remoteEntry. This requires a fixed build order: build remotes before the host.
+  </Accordion>
+  <Accordion title="Build target for Vite">
+    The Vite configuration sets `build.target: 'chrome89'` to enable native ESM and top-level await, both of which `@module-federation/vite` depends on. Do not lower this target without testing federation behaviour.
+  </Accordion>
+</AccordionGroup>

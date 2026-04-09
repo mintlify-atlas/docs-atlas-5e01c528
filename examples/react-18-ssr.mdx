@@ -1,0 +1,352 @@
+---
+title: "React 18 SSR"
+description: "Server-Side Rendering with React 18 Suspense and Module Federation streaming"
+---
+
+The `react-18-ssr` example demonstrates a full-stack Module Federation setup where federated components are rendered on the server using React 18's `renderToPipeableStream` for streaming HTML delivery. It builds on the same shell/remote1/remote2 architecture as the earlier `server-side-rendering` example but uses the newer `UniversalFederationPlugin` from `@module-federation/node`.
+
+## Application architecture
+
+Three independent applications work together:
+
+<CardGroup cols={3}>
+  <Card title="shell" icon="house">
+    Host application with the SSR Node.js server. Consumes `Content` from remote1. Serves on port 3000.
+  </Card>
+  <Card title="remote1" icon="plug">
+    Exposes `Content`. Also consumes `Image` from remote2. Serves on port 3001.
+  </Card>
+  <Card title="remote2" icon="image">
+    Exposes `Image`. No upstream remotes. Serves on port 3002.
+  </Card>
+</CardGroup>
+
+The dependency chain flows one way: `shell → remote1 → remote2`. The shell only needs to know about remote1; remote2's `Image` component is consumed transitively through remote1's `Content`.
+
+## How it differs from React 16/17 SSR
+
+The `react-16-17-18-ssr` example demonstrates that the same webpack SSR pattern works across React versions. In that example:
+
+- `shell` runs React 18.2.0
+- `remote1` runs React 16.6.3
+- `remote2` runs React 17.0.2
+
+Each application shares its own React version as a singleton within its own bundle. Module Federation handles version negotiation at the share scope level so multiple React copies don't collide.
+
+The `react-18-ssr` example uses React 18 throughout and swaps `NodeFederationPlugin` + `StreamingTargetPlugin` (used in `server-side-rendering`) for the newer consolidated `UniversalFederationPlugin`.
+
+| Example | Server plugin | React |
+| --- | --- | --- |
+| `server-side-rendering` | `NodeFederationPlugin` + `StreamingTargetPlugin` | 16+ |
+| `react-18-ssr` | `UniversalFederationPlugin` | 18 |
+| `react-16-17-18-ssr` | `UniversalFederationPlugin` | 16, 17, 18 (mixed) |
+
+## Webpack configuration
+
+Every application produces two webpack bundles: one for the Node.js server and one for the browser client. The federation plugin config differs between them.
+
+### Shell
+
+The shell configuration uses `UniversalFederationPlugin` for the server build and the standard `ModuleFederationPlugin` (with `asyncStartup` experiment) for the client build.
+
+<CodeGroup>
+
+```javascript react-18-ssr/shell/config/module-federation.js
+const deps = require('../package.json').dependencies;
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const { UniversalFederationPlugin } = require('@module-federation/node');
+
+module.exports = {
+  client: new ModuleFederationPlugin({
+    experiments: { asyncStartup: true },
+    name: 'shell',
+    filename: 'container.js',
+    remotes: {
+      remote1: 'remote1@http://localhost:3001/client/remoteEntry.js',
+    },
+    shared: [{ react: deps.react, 'react-dom': deps['react-dom'] }],
+  }),
+  server: [
+    new UniversalFederationPlugin({
+      remoteType: 'script',
+      name: 'shell',
+      isServer: true,
+      library: { type: 'commonjs-module' },
+      filename: 'remoteEntry.js',
+      remotes: {
+        remote1: 'remote1@http://localhost:3001/server/remoteEntry.js',
+      },
+      shared: [{ react: deps.react, 'react-dom': deps['react-dom'] }],
+    }),
+  ],
+};
+```
+
+```javascript react-18-ssr/shell/config/webpack.server.js
+const path = require('path');
+const { merge } = require('webpack-merge');
+const shared = require('./webpack.shared');
+const moduleFederationPlugin = require('./module-federation');
+
+const webpackConfig = {
+  name: 'server',
+  target: false,
+  entry: ['@babel/polyfill', path.resolve(__dirname, '../src/server/index')],
+  output: {
+    path: path.resolve(__dirname, '../dist/server'),
+    filename: '[name].js',
+    libraryTarget: 'commonjs-module',
+  },
+  mode: 'production',
+  plugins: [...moduleFederationPlugin.server],
+};
+
+module.exports = merge(shared, webpackConfig);
+```
+
+```javascript react-18-ssr/shell/config/webpack.client.js
+const path = require('path');
+const { merge } = require('webpack-merge');
+const shared = require('./webpack.shared');
+const moduleFederationPlugin = require('./module-federation');
+
+const webpackConfig = {
+  name: 'client',
+  target: 'web',
+  entry: ['@babel/polyfill', path.resolve(__dirname, '../src/client/index')],
+  mode: 'production',
+  devtool: 'source-map',
+  output: {
+    path: path.resolve(__dirname, '../dist/client'),
+    filename: '[name].js',
+    chunkFilename: '[name].js',
+    publicPath: 'http://localhost:3000/static/',
+  },
+  plugins: [moduleFederationPlugin.client],
+};
+
+module.exports = merge(shared, webpackConfig);
+```
+
+</CodeGroup>
+
+<Info>
+  `target: false` on the server build disables webpack's built-in target defaults. This is necessary so that `UniversalFederationPlugin` can apply its own Node.js-specific module loading patches without conflicting with webpack defaults.
+</Info>
+
+### Remote1
+
+Remote1 both **exposes** a module (`./Content`) and **consumes** one from remote2 (`remote2@.../remoteEntry.js`). The server build points at `remote2`'s server entry; the client build points at the client entry.
+
+<CodeGroup>
+
+```javascript react-18-ssr/remote1/config/module-federation.js
+const deps = require('../package.json').dependencies;
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const { UniversalFederationPlugin } = require('@module-federation/node');
+
+module.exports = {
+  client: new ModuleFederationPlugin({
+    experiments: { asyncStartup: true },
+    name: 'remote1',
+    filename: 'remoteEntry.js',
+    remotes: {
+      remote2: 'remote2@http://localhost:3002/client/remoteEntry.js',
+    },
+    exposes: {
+      './Content': './src/Content',
+    },
+    shared: {
+      ...deps,
+      react: { singleton: true, requiredVersion: deps.react },
+      'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+    },
+  }),
+  server: [
+    new UniversalFederationPlugin({
+      remoteType: 'script',
+      name: 'remote1',
+      filename: 'remoteEntry.js',
+      library: { type: 'commonjs-module' },
+      isServer: true,
+      remotes: {
+        remote2: 'remote2@http://localhost:3002/server/remoteEntry.js',
+      },
+      exposes: {
+        './Content': './src/Content',
+      },
+      shared: {
+        ...deps,
+        react: { singleton: true, requiredVersion: deps.react },
+        'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+      },
+    }),
+  ],
+};
+```
+
+```javascript react-18-ssr/remote1/config/webpack.server.js
+const path = require('path');
+const { merge } = require('webpack-merge');
+const sharedWebpackConfig = require('./webpack.shared');
+const moduleFederationPlugin = require('./module-federation');
+
+const webpackConfig = {
+  output: {
+    path: path.resolve(__dirname, '../dist/server'),
+    filename: '[name].js',
+    libraryTarget: 'commonjs-module',
+  },
+  target: false,
+  name: 'server',
+  plugins: [...moduleFederationPlugin.server],
+};
+
+module.exports = merge(sharedWebpackConfig, webpackConfig);
+```
+
+```javascript react-18-ssr/remote1/config/webpack.client.js
+const path = require('path');
+const { merge } = require('webpack-merge');
+const sharedWebpackConfig = require('./webpack.shared');
+const moduleFederationPlugin = require('./module-federation');
+const HtmlWebPackPlugin = require('html-webpack-plugin');
+
+const webpackConfig = {
+  output: {
+    path: path.resolve(__dirname, '../dist/client'),
+    publicPath: 'http://localhost:3001/client/',
+  },
+  plugins: [
+    moduleFederationPlugin.client,
+    new HtmlWebPackPlugin({ template: './src/index.html' }),
+  ],
+};
+
+module.exports = merge(sharedWebpackConfig, webpackConfig);
+```
+
+</CodeGroup>
+
+### Remote2
+
+Remote2 only exposes `./Image` — it has no upstream remotes of its own.
+
+```javascript react-18-ssr/remote2/config/module-federation.js
+const deps = require('../package.json').dependencies;
+const { ModuleFederationPlugin } = require('@module-federation/enhanced/webpack');
+const { UniversalFederationPlugin } = require('@module-federation/node');
+
+module.exports = {
+  client: new ModuleFederationPlugin({
+    experiments: { asyncStartup: true },
+    name: 'remote2',
+    filename: 'remoteEntry.js',
+    remotes: {},
+    exposes: {
+      './Image': './src/Image',
+    },
+    shared: {
+      ...deps,
+      react: { singleton: true, requiredVersion: deps.react },
+      'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+    },
+  }),
+  server: [
+    new UniversalFederationPlugin({
+      remoteType: 'script',
+      name: 'remote2',
+      isServer: true,
+      filename: 'remoteEntry.js',
+      library: { type: 'commonjs-module' },
+      remotes: {},
+      exposes: {
+        './Image': './src/Image',
+      },
+      shared: {
+        ...deps,
+        react: { singleton: true, requiredVersion: deps.react },
+        'react-dom': { singleton: true, requiredVersion: deps['react-dom'] },
+      },
+    }),
+  ],
+};
+```
+
+## React Suspense and federated components on the server
+
+On the server, the shell wraps federated component imports in React Suspense. Because `UniversalFederationPlugin` adds async module loading support to the Node.js runtime, the SSR render can "suspend" on a federated component until the remote module is available — the same way a browser would.
+
+The general pattern in the shell's server entry looks like this:
+
+```jsx
+import React, { Suspense } from 'react';
+import { renderToPipeableStream } from 'react-dom/server';
+
+// Lazy import of a federated component
+const Content = React.lazy(() => import('remote1/Content'));
+
+function App() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <Content />
+    </Suspense>
+  );
+}
+
+// Stream the shell HTML to the response
+const { pipe } = renderToPipeableStream(<App />, {
+  onShellReady() {
+    res.setHeader('Content-type', 'text/html');
+    pipe(res);
+  },
+});
+```
+
+`renderToPipeableStream` sends the shell HTML immediately and streams in suspended content as it resolves. This means the browser receives a first byte before all remote modules have loaded, improving time-to-first-byte.
+
+## Running the example
+
+<Steps>
+  <Step title="Install dependencies">
+    From the repository root:
+    ```bash
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Build and start all applications">
+    ```bash
+    cd react-18-ssr
+    pnpm run start
+    ```
+
+    This builds all three applications (remote2, then remote1, then shell) and starts their servers.
+  </Step>
+
+  <Step title="Open the shell">
+    | App | Role | URL |
+    | --- | --- | --- |
+    | shell | Host + SSR server | http://localhost:3000 |
+    | remote1 | Content remote | http://localhost:3001 |
+    | remote2 | Image remote | http://localhost:3002 |
+
+    Open `http://localhost:3000` to see the shell rendering `Content` from remote1, which itself includes `Image` from remote2.
+
+    You can also open remote1 and remote2 directly — each runs as a standalone application.
+  </Step>
+</Steps>
+
+## CSS federation in SSR
+
+The `federated-css-react-ssr` example extends the Suspense-based SSR pattern with support for multiple styling libraries. It demonstrates that CSS must be collected during server rendering and injected into the HTML response, because CSS-in-JS libraries and CSS Modules store their styles in module-level state that is reset on each request.
+
+The three supported approaches are:
+
+| Styling library | Mechanism | Shell requirement |
+| --- | --- | --- |
+| CSS / SCSS / Less / Tailwind (via `isomorphic-style-loader`) | `insertCss` collector + `StyleContext` | Import each remote's `StyleContext` and compose providers |
+| `react-jss` | `SheetsRegistry` + `JssProvider` | Share `react-jss` as singleton, use `JssProvider` during render |
+| `styled-components` | `ServerStyleSheet.collectStyles()` | Share `styled-components` as singleton, call `getStyleTags()` after render |
+
+See the [SSR overview — CSS federation section](/examples/ssr-overview#css-federation-in-ssr) for code samples for each approach.
